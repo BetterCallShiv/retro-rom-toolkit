@@ -669,7 +669,6 @@ def process_single_game(game, total, session_pool, platform_id=""):
                 ratings["screenscraper"] = ss_data
                 break
 
-    # Cross-Bridge 1: If Metacritic failed but ScreenScraper succeeded, query Metacritic with ScreenScraper's official title
     if ("metacritic" not in ratings or not ratings["metacritic"]) and ("screenscraper" in ratings and ratings["screenscraper"]):
         ss_info = ratings["screenscraper"]
         ss_titles = []
