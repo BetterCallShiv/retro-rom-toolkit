@@ -271,6 +271,41 @@ def clean_base_title(raw_title):
     return re.sub(r"\s+", " ", t).strip()
 
 
+def clean_filename_to_title(filename):
+    if not filename:
+        return ""
+    name = re.sub(r"\.[a-zA-Z0-9]{2,4}$", "", filename)
+    name = re.sub(r"^\s*\[?\d{3,5}\]?\s*[-–—]\s*", "", name)
+    name = re.sub(r"\[.*?\]", "", name)
+    name = re.sub(
+        r"\((?:[^\)]*(?:japan|usa|europe|asia|korea|world|en|ja|fr|de|es|it|v\d|beta|proto|disc|cd|track|dlc|psn|psp|demo|guide)[^\)]*)\)",
+        "",
+        name,
+        flags=re.I,
+    )
+    name = re.sub(r"\s*\([^\)]*\)\s*$", "", name)
+    return re.sub(r"\s+", " ", name).strip(" -–—_")
+
+
+def strip_dlc_and_addons(title):
+    if not title:
+        return ""
+    for delim in [" - ", " – ", " — ", ": "]:
+        if delim in title:
+            parts = title.split(delim)
+            for i in range(len(parts) - 1, 0, -1):
+                tail = " ".join(parts[i:])
+                if re.search(r"\b(dlc|level\s*pack|quest\s*pack|booster\s*pack|mission\s*pack|track\s*pack|map\s*pack|pack|guide|addon|add-on|costume|bonus|expansion)\b", tail, re.I):
+                    return delim.join(parts[:i]).strip(" -–—_")
+    cleaned = re.sub(
+        r"\s+[-:]?\s*(?:bui\s*bui|official|koushiki)?\s*(?:level\s*pack|quest\s*pack|booster\s*pack|strategy\s*guide|guide\s*book|dlc|expansion)\b.*$",
+        "",
+        title,
+        flags=re.I,
+    ).strip(" -–—_")
+    return cleaned if cleaned and cleaned != title else ""
+
+
 def clean_title_for_screenscraper(raw_title):
     base = clean_base_title(raw_title)
     queries = []
@@ -401,15 +436,22 @@ def fetch_metacritic(session, raw_title):
             user_ratings_count = None
             if hero:
                 txt = hero.get_text(separator=" | ")
-                m_meta = re.search(r"Metascore\s*\|\s*([^|]+)\s*\|\s*Based on (\d+) Critic Reviews\s*\|\s*(\d{2,3})", txt, re.I)
-                if m_meta:
-                    sentiment = m_meta.group(1).strip()
-                    reviews_count = int(m_meta.group(2))
-                    metascore = int(m_meta.group(3))
+                if "critic reviews are not available" in txt.lower() or "metascore | tbd" in txt.lower():
+                    metascore = None
                 else:
-                    m_num = re.search(r"Metascore[^\d]*(\d{2,3})", txt, re.I)
-                    if m_num:
-                        metascore = int(m_num.group(1))
+                    m_meta = re.search(r"Metascore\s*\|\s*([^|]+)\s*\|\s*Based on (\d+) Critic Reviews\s*\|\s*(\d{1,3})", txt, re.I)
+                    if m_meta:
+                        sentiment = m_meta.group(1).strip()
+                        reviews_count = int(m_meta.group(2))
+                        val = int(m_meta.group(3))
+                        if 0 <= val <= 100:
+                            metascore = val
+                    else:
+                        m_num = re.search(r"Metascore\s*\|\s*(\d{1,3})\b", txt, re.I)
+                        if m_num:
+                            val = int(m_num.group(1))
+                            if 0 <= val <= 100:
+                                metascore = val
                 m_user = re.search(r"User score\s*\|\s*([^|]+)\s*\|\s*Based on ([\d,]+) User Ratings\s*\|\s*([\d\.]+)", txt, re.I)
                 if m_user:
                     user_ratings_count = int(m_user.group(2).replace(",", ""))
@@ -423,10 +465,14 @@ def fetch_metacritic(session, raw_title):
                             pass
             if metascore is None:
                 el_score = soup.find("div", class_=re.compile(r"c-productScoreInfo|product-score-card__score"))
-                if el_score:
-                    m = re.search(r"\b(\d{2,3})\b", el_score.get_text())
+                if el_score and "tbd" not in el_score.get_text().lower():
+                    m = re.search(r"\b(\d{1,3})\b", el_score.get_text())
                     if m:
-                        metascore = int(m.group(1))
+                        val = int(m.group(1))
+                        if 0 <= val <= 100:
+                            metascore = val
+            if metascore is not None and not (0 <= metascore <= 100):
+                metascore = None
             if metascore is None:
                 continue
             if metascore >= 90:
@@ -437,6 +483,18 @@ def fetch_metacritic(session, raw_title):
                 sentiment = "Mixed or Average"
             else:
                 sentiment = "Generally Unfavorable"
+
+            mc_title = ""
+            h1 = soup.find("h1")
+            if h1 and h1.get_text(strip=True):
+                mc_title = h1.get_text(strip=True)
+            elif hero:
+                og = soup.find("meta", property="og:title")
+                if og and og.get("content"):
+                    mc_title = re.sub(r"\s+Reviews.*$", "", og.get("content")).strip()
+            if not mc_title:
+                mc_title = slug.replace("-", " ").title()
+
             return {
                 "metascore": metascore,
                 "user_score": user_score,
@@ -444,6 +502,7 @@ def fetch_metacritic(session, raw_title):
                 "review_count": reviews_count,
                 "sentiment": sentiment,
                 "url": url,
+                "canonical_title": mc_title,
             }
         except Exception:
             continue
@@ -508,12 +567,14 @@ def fetch_screenscraper(session_pool, raw_title, platform_id=""):
                 if not candidates:
                     continue
                 best_href = candidates[0][0]
+                best_name = candidates[0][1]
                 norm_raw = re.sub(r"[^a-z0-9]", "", raw_title.lower())
                 best_sim = -1
                 for href, c_name in candidates:
                     norm_c = re.sub(r"[^a-z0-9]", "", c_name.lower())
                     if norm_c == norm_raw:
                         best_href = href
+                        best_name = c_name
                         break
                     c_words = set(c_name.lower().split())
                     raw_words = set(raw_title.lower().split())
@@ -521,18 +582,29 @@ def fetch_screenscraper(session_pool, raw_title, platform_id=""):
                     if sim > best_sim:
                         best_sim = sim
                         best_href = href
+                        best_name = c_name
                 target_url = "https://www.screenscraper.fr/" + best_href.lstrip("/")
                 rg = sess.get(target_url, timeout=12)
                 if rg.status_code != 200:
                     continue
                 val = parse_screenscraper_rating(rg.text)
                 if val is not None:
+                    page_title = best_name
+                    try:
+                        soup_g = BeautifulSoup(rg.text, "html.parser")
+                        h1 = soup_g.find("h1")
+                        if h1 and h1.get_text(strip=True):
+                            page_title = h1.get_text(strip=True)
+                    except Exception:
+                        pass
                     return {
                         "rating": val,
                         "rating_max": 20,
                         "percentage": round((val / 20.0) * 100, 1),
                         "url": target_url,
                         "scraped_by": user_name,
+                        "matched_title": best_name,
+                        "page_title": page_title,
                     }
             except Exception:
                 continue
@@ -546,13 +618,17 @@ def calculate_overall_score(ratings):
     ss = ratings.get("screenscraper")
     meta_score = meta.get("metascore") if meta else None
     ss_pct = ss.get("percentage") if ss else None
-    if meta_score is not None and ss_pct is not None:
-        return round((meta_score * 0.70) + (ss_pct * 0.30), 1)
-    elif meta_score is not None:
-        return float(meta_score)
-    elif ss_pct is not None:
-        return float(ss_pct)
-    return 0.0
+
+    valid_scores = []
+    if meta_score is not None and 0 <= meta_score <= 100:
+        valid_scores.append(float(meta_score))
+    if ss_pct is not None and 0 <= ss_pct <= 100:
+        valid_scores.append(float(ss_pct))
+
+    if not valid_scores:
+        return 0.0
+
+    return round(max(valid_scores), 1)
 
 
 _progress_counter = 0
@@ -562,22 +638,68 @@ _progress_lock = threading.Lock()
 def process_single_game(game, total, session_pool, platform_id=""):
     global _progress_counter
     mc_session = requests.Session()
-    title = (
+    primary_title = (
         game.get("db_title")
         or game.get("title")
         or game.get("user_request")
         or game.get("searched_as")
         or "Unknown"
     )
+    raw_fn = game.get("filename") or ""
+    fn_title = clean_filename_to_title(raw_fn) if raw_fn else ""
+    dlc_base_title = strip_dlc_and_addons(fn_title) or strip_dlc_and_addons(primary_title)
+
+    candidates = []
+    for c in [primary_title, fn_title, dlc_base_title]:
+        if c and c not in candidates:
+            candidates.append(c)
+
     ratings = game.get("ratings") or {}
     if "metacritic" not in ratings or not ratings["metacritic"]:
-        mc_data = fetch_metacritic(mc_session, title)
-        if mc_data:
-            ratings["metacritic"] = mc_data
+        for cand in candidates:
+            mc_data = fetch_metacritic(mc_session, cand)
+            if mc_data:
+                ratings["metacritic"] = mc_data
+                break
+
     if "screenscraper" not in ratings or not ratings["screenscraper"]:
-        ss_data = fetch_screenscraper(session_pool, title, platform_id)
-        if ss_data:
-            ratings["screenscraper"] = ss_data
+        for cand in candidates:
+            ss_data = fetch_screenscraper(session_pool, cand, platform_id)
+            if ss_data:
+                ratings["screenscraper"] = ss_data
+                break
+
+    # Cross-Bridge 1: If Metacritic failed but ScreenScraper succeeded, query Metacritic with ScreenScraper's official title
+    if ("metacritic" not in ratings or not ratings["metacritic"]) and ("screenscraper" in ratings and ratings["screenscraper"]):
+        ss_info = ratings["screenscraper"]
+        ss_titles = []
+        for key in ["page_title", "matched_title"]:
+            t = ss_info.get(key)
+            if t and t not in candidates and t not in ss_titles:
+                ss_titles.append(t)
+                dlc_t = strip_dlc_and_addons(t)
+                if dlc_t and dlc_t not in candidates and dlc_t not in ss_titles:
+                    ss_titles.append(dlc_t)
+        for sst in ss_titles:
+            mc_data = fetch_metacritic(mc_session, sst)
+            if mc_data:
+                ratings["metacritic"] = mc_data
+                break
+
+    if ("screenscraper" not in ratings or not ratings["screenscraper"]) and ("metacritic" in ratings and ratings["metacritic"]):
+        mc_info = ratings["metacritic"]
+        mc_canon = mc_info.get("canonical_title")
+        if mc_canon and mc_canon not in candidates:
+            mc_titles = [mc_canon]
+            dlc_mc = strip_dlc_and_addons(mc_canon)
+            if dlc_mc and dlc_mc not in candidates and dlc_mc not in mc_titles:
+                mc_titles.append(dlc_mc)
+            for mct in mc_titles:
+                ss_data = fetch_screenscraper(session_pool, mct, platform_id)
+                if ss_data:
+                    ratings["screenscraper"] = ss_data
+                    break
+
     overall = calculate_overall_score(ratings)
     game["overall_rank_score"] = overall
     game["ratings"] = ratings
@@ -587,7 +709,7 @@ def process_single_game(game, total, session_pool, platform_id=""):
         pct = (curr / total) * 100
     mc_str = f"Metacritic: {ratings['metacritic']['metascore']}" if "metacritic" in ratings else "Metacritic: --"
     ss_str = f"ScreenScraper: {ratings['screenscraper']['rating']}/20 ({ratings['screenscraper']['percentage']}%)" if "screenscraper" in ratings else "ScreenScraper: --"
-    print(f"[{curr:4d}/{total:4d} | {pct:4.1f}%] {title[:42]:42} -> Score: {overall:5.1f} | {mc_str} | {ss_str}")
+    print(f"[{curr:4d}/{total:4d} | {pct:4.1f}%] {primary_title[:42]:42} -> Score: {overall:5.1f} | {mc_str} | {ss_str}")
     return game
 
 
@@ -800,14 +922,23 @@ def main():
     print("\n" + "=" * 80)
     print(f"TOP {top_n} HIGHEST RATED GAMES (HALL OF FAME)")
     print("=" * 80)
-    for rank, g in enumerate(enriched_games[:top_n], 1):
+    seen_titles = set()
+    rank = 1
+    for g in enriched_games:
+        if rank > top_n:
+            break
         title = g.get("db_title") or g.get("user_request") or g.get("title")
+        norm_t = re.sub(r"[^a-z0-9]", "", str(title).lower())
+        if norm_t in seen_titles:
+            continue
+        seen_titles.add(norm_t)
         score = g.get("overall_rank_score", 0.0)
         ratings = g.get("ratings", {})
         mc = ratings.get("metacritic", {}).get("metascore", "--")
         ss = ratings.get("screenscraper", {}).get("rating", "--")
         ss_str = f"{ss}/20" if ss != "--" else "--"
         print(f" {rank:3d}. [{score:5.1f}/100] {title[:40]:40} (Metascore: {str(mc):>2} | ScreenScraper: {ss_str})")
+        rank += 1
     print("=" * 80)
 
 if __name__ == "__main__":
