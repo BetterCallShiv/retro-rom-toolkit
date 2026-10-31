@@ -1,0 +1,27 @@
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Scraped & downloaded ROMs
+playstation-portable/
+*.zip
+*.7z
+*.rar
+*.iso
+*.cso
+*.chd
+*.pbp
+
+# Configs
+screenscraper_config.json
+tools/
+*.exe
+
+# Environment & editor
+.env
+.venv
+env/
+venv/
+.vscode/
+.idea/
+

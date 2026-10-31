@@ -627,7 +627,7 @@ def _finalize_saved_file(dest_path, dest_dir, game, auto_compress=False, ui=None
                 out_names = ", ".join(os.path.basename(c) for c in created_outs)
                 if sz_orig > sz_final and sz_orig > 0:
                     pct_saved = round((1.0 - (sz_final / sz_orig)) * 100)
-                    ratio_str = f"{format_bytes(sz_final)} from {format_bytes(sz_orig)} raw, {pct_saved:.0f}% saved"
+                    ratio_str = f"{format_bytes(sz_final)} from {format_bytes(sz_orig)}, {pct_saved:.0f}% saved"
                 else:
                     ratio_str = f"{format_bytes(sz_final)} from {format_bytes(sz_orig)}"
                 if ui and hasattr(ui, "game_finished"):

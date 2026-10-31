@@ -299,18 +299,28 @@ def create_cue_sheet(bin_path, cue_path):
         f.write(cue_content)
 
 
+def get_default_threads():
+    cores = os.cpu_count() or 4
+    return max(1, cores - 2)
+
+
 def compress_iso_to_cso(iso_path, cso_path, num_threads=None):
     maxcso_tool = ensure_maxcso(interactive=True) or find_tool("maxcso")
     if not maxcso_tool or not os.path.isfile(maxcso_tool):
         return False
-    threads_arg = f"--threads={num_threads or os.cpu_count() or 4}"
-    cmd = [maxcso_tool, iso_path, "-o", cso_path, threads_arg, "--quiet"]
+    threads = num_threads or get_default_threads()
+    cmd = [maxcso_tool, iso_path, "-o", cso_path, "--block=2048", f"--threads={threads}", "--quiet"]
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     with _lock:
         _active_procs.add(proc)
-    res_code = proc.wait()
-    with _lock:
-        _active_procs.discard(proc)
+    try:
+        res_code = proc.wait(timeout=600)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        res_code = 1
+    finally:
+        with _lock:
+            _active_procs.discard(proc)
     return res_code == 0 and os.path.isfile(cso_path) and os.path.getsize(cso_path) > 0
 
 
@@ -404,7 +414,7 @@ def compress_rom(src_path, dest_dir=None, keep_source=False, num_threads=None):
             raw_iso_size = os.path.getsize(psp_iso) if os.path.exists(psp_iso) else src_size
             target_cso = os.path.join(dest_dir, f"{base_title}.cso")
             temp_cso = os.path.join(work_dir, "output.cso")
-            ok_cso = compress_iso_to_cso(psp_iso, temp_cso)
+            ok_cso = compress_iso_to_cso(psp_iso, temp_cso, num_threads=num_threads)
             if not ok_cso or not os.path.exists(temp_cso):
                 return False, "PSP CSO compression failed", raw_iso_size, 0, []
             if os.path.exists(target_cso):
@@ -522,7 +532,8 @@ def compress_rom(src_path, dest_dir=None, keep_source=False, num_threads=None):
             if f.lower().endswith((".bin", ".iso", ".img", ".mdf", ".raw"))
         ) or src_size
         created_chds = []
-        cpus = str(num_threads or os.cpu_count() or 4)
+        effective_threads = num_threads or get_default_threads()
+        cpus = str(effective_threads)
         for idx, (disc_input, cmd_mode) in enumerate(input_discs, 1):
             disc_dir = os.path.dirname(disc_input)
             disc_fn = os.path.basename(disc_input)
@@ -539,18 +550,31 @@ def compress_rom(src_path, dest_dir=None, keep_source=False, num_threads=None):
             proc = subprocess.Popen(cmd_create, cwd=disc_dir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             with _lock:
                 _active_procs.add(proc)
-            res_code = proc.wait()
-            with _lock:
-                _active_procs.discard(proc)
+            try:
+                res_code = proc.wait(timeout=600)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                return False, f"chdman {cmd_mode} timed out (10 mins) for {disc_fn}", src_size, 0, []
+            finally:
+                with _lock:
+                    _active_procs.discard(proc)
+
             if res_code != 0 or not os.path.exists(temp_chd) or os.path.getsize(temp_chd) == 0:
                 return False, f"chdman {cmd_mode} failed for {disc_fn}", src_size, 0, []
+
             cmd_verify = [chdman_tool, "verify", "-i", temp_chd]
             proc_v = subprocess.Popen(cmd_verify, cwd=disc_dir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             with _lock:
                 _active_procs.add(proc_v)
-            res_v = proc_v.wait()
-            with _lock:
-                _active_procs.discard(proc_v)
+            try:
+                res_v = proc_v.wait(timeout=180)
+            except subprocess.TimeoutExpired:
+                proc_v.kill()
+                return False, f"chdman verification timed out (3 mins) for {disc_fn}", src_size, 0, []
+            finally:
+                with _lock:
+                    _active_procs.discard(proc_v)
+
             if res_v != 0:
                 return False, f"chdman verification failed for {disc_fn}", src_size, 0, []
             if os.path.exists(final_chd):
