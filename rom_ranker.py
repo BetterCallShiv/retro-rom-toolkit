@@ -364,6 +364,10 @@ JP_WESTERN_ALIASES = {
     "taito memories pocket": "taito-legends-power-up",
     "bleach soul carnival": "bleach-soul-carnival",
     "bleach soul carnival 2": "bleach-soul-carnival-2",
+    "dangan-ronpa - kibou no gakuen": "danganronpa-trigger-happy-havoc",
+    "danganronpa - kibou no gakuen": "danganronpa-trigger-happy-havoc",
+    "dangan-ronpa kibou no gakuen": "danganronpa-trigger-happy-havoc",
+    "danganronpa kibou no gakuen": "danganronpa-trigger-happy-havoc",
 }
 
 
@@ -573,60 +577,105 @@ def fetch_screenscraper(session_pool, raw_title, platform_id=""):
                     href = a.get("href", "")
                     if "gameinfos.php" in href:
                         candidates.append((href, a.get_text(strip=True)))
-                if not candidates and platform_id:
+
+                norm_raw = re.sub(r"[^a-z0-9]", "", raw_title.lower())
+                raw_nums = set(re.findall(r"\b(?:2|3|4|5|6|7|8|9|ii|iii|iv|v|vi|vii|viii)\b", raw_title.lower()))
+
+                valid_candidates = []
+                for href, c_name in candidates:
+                    c_nums = set(re.findall(r"\b(?:2|3|4|5|6|7|8|9|ii|iii|iv|v|vi|vii|viii)\b", c_name.lower()))
+                    if c_nums - raw_nums:
+                        continue
+                    valid_candidates.append((href, c_name))
+
+                def score_cand(item):
+                    href, c_name = item
+                    norm_c = re.sub(r"[^a-z0-9]", "", c_name.lower())
+                    if norm_c == norm_raw:
+                        return 1000
+                    c_words = set(c_name.lower().split())
+                    raw_words = set(raw_title.lower().split())
+                    return len(c_words & raw_words)
+
+                valid_candidates.sort(key=score_cand, reverse=True)
+
+                found_result = None
+                for href, c_name in valid_candidates[:3]:
+                    target_url = "https://www.screenscraper.fr/" + href.lstrip("/")
+                    try:
+                        rg = sess.get(target_url, timeout=12)
+                        if rg.status_code != 200:
+                            continue
+                        val = parse_screenscraper_rating(rg.text)
+                        if val is not None:
+                            page_title = c_name
+                            try:
+                                soup_g = BeautifulSoup(rg.text, "html.parser")
+                                h1 = soup_g.find("h1")
+                                if h1 and h1.get_text(strip=True):
+                                    page_title = h1.get_text(strip=True)
+                            except Exception:
+                                pass
+                            found_result = {
+                                "rating": val,
+                                "rating_max": 20,
+                                "percentage": round((val / 20.0) * 100, 1),
+                                "url": target_url,
+                                "scraped_by": user_name,
+                                "matched_title": c_name,
+                                "page_title": page_title,
+                            }
+                            break
+                    except Exception:
+                        continue
+
+                if found_result:
+                    return found_result
+
+                if platform_id:
                     payload["rechercheplateforme"] = ""
-                    r = sess.post(
+                    r_unrest = sess.post(
                         "https://www.screenscraper.fr/recherche.php?numpage=0&action=newrecherche",
                         data=payload,
                         timeout=12,
                     )
-                    soup = BeautifulSoup(r.text, "html.parser")
-                    for a in soup.find_all("a"):
+                    soup_unrest = BeautifulSoup(r_unrest.text, "html.parser")
+                    unrest_candidates = []
+                    for a in soup_unrest.find_all("a"):
                         href = a.get("href", "")
                         if "gameinfos.php" in href:
-                            candidates.append((href, a.get_text(strip=True)))
-                if not candidates:
-                    continue
-                best_href = candidates[0][0]
-                best_name = candidates[0][1]
-                norm_raw = re.sub(r"[^a-z0-9]", "", raw_title.lower())
-                best_sim = -1
-                for href, c_name in candidates:
-                    norm_c = re.sub(r"[^a-z0-9]", "", c_name.lower())
-                    if norm_c == norm_raw:
-                        best_href = href
-                        best_name = c_name
-                        break
-                    c_words = set(c_name.lower().split())
-                    raw_words = set(raw_title.lower().split())
-                    sim = len(c_words & raw_words)
-                    if sim > best_sim:
-                        best_sim = sim
-                        best_href = href
-                        best_name = c_name
-                target_url = "https://www.screenscraper.fr/" + best_href.lstrip("/")
-                rg = sess.get(target_url, timeout=12)
-                if rg.status_code != 200:
-                    continue
-                val = parse_screenscraper_rating(rg.text)
-                if val is not None:
-                    page_title = best_name
-                    try:
-                        soup_g = BeautifulSoup(rg.text, "html.parser")
-                        h1 = soup_g.find("h1")
-                        if h1 and h1.get_text(strip=True):
-                            page_title = h1.get_text(strip=True)
-                    except Exception:
-                        pass
-                    return {
-                        "rating": val,
-                        "rating_max": 20,
-                        "percentage": round((val / 20.0) * 100, 1),
-                        "url": target_url,
-                        "scraped_by": user_name,
-                        "matched_title": best_name,
-                        "page_title": page_title,
-                    }
+                            c_name = a.get_text(strip=True)
+                            c_nums = set(re.findall(r"\b(?:2|3|4|5|6|7|8|9|ii|iii|iv|v|vi|vii|viii)\b", c_name.lower()))
+                            if not (c_nums - raw_nums):
+                                unrest_candidates.append((href, c_name))
+                    unrest_candidates.sort(key=score_cand, reverse=True)
+                    for href, c_name in unrest_candidates[:3]:
+                        target_url = "https://www.screenscraper.fr/" + href.lstrip("/")
+                        try:
+                            rg = sess.get(target_url, timeout=12)
+                            if rg.status_code != 200:
+                                continue
+                            val = parse_screenscraper_rating(rg.text)
+                            if val is not None:
+                                page_title = c_name
+                                try:
+                                    soup_g = BeautifulSoup(rg.text, "html.parser")
+                                    h1 = soup_g.find("h1")
+                                    if h1 and h1.get_text(strip=True):
+                                        page_title = h1.get_text(strip=True)
+                                except Exception:
+                                    pass
+                                return {
+                                    "rating": val,
+                                    "rating_max": 20,
+                                    "percentage": round((val / 20.0) * 100, 1),
+                                    "url": target_url,
+                                    "scraped_by": user_name,
+                                    "matched_title": c_name,
+                                    "page_title": page_title,
+                                }
+                        except Exception:
+                            continue
             except Exception:
                 continue
     finally:
