@@ -310,7 +310,7 @@ def clean_title_for_screenscraper(raw_title):
     base = clean_base_title(raw_title)
     queries = []
     clean = re.sub(r"\s+featuring\s+.*$", "", base, flags=re.I)
-    clean = re.sub(r"^(disney-pixar|disney|tom clancy\'s|marvel\'s)\s*[-:]?\s*", "", clean, flags=re.I)
+    clean = re.sub(r"^(disney[-']s|disney-pixar|disney|tom clancy[-']s|marvel[-']s)\s*[-:]?\s*", "", clean, flags=re.I)
     clean = clean.replace("Vs.", "Vs").replace("vs.", "vs")
     clean = re.sub(r"[!?]", "", clean).strip()
     if clean and clean not in queries:
@@ -368,6 +368,25 @@ JP_WESTERN_ALIASES = {
     "danganronpa - kibou no gakuen": "danganronpa-trigger-happy-havoc",
     "dangan-ronpa kibou no gakuen": "danganronpa-trigger-happy-havoc",
     "danganronpa kibou no gakuen": "danganronpa-trigger-happy-havoc",
+    "disney's tarzan": "tarzan",
+    "disneys tarzan": "tarzan",
+    "spacestation silicon valley": "space-station-silicon-valley",
+    "tokisora senshi turok": "turok-dinosaur-hunter",
+    "violence killer": "turok-2-seeds-of-evil",
+    "pocket monsters snap": "pokemon-snap",
+    "pokemon snap station": "pokemon-snap",
+    "pikachu genki dechu": "hey-you-pikachu",
+    "pikachuu genki de chuu": "hey-you-pikachu",
+    "baku bomberman 2": "bomberman-64-the-second-attack",
+    "baku bomberman": "bomberman-64",
+    "chou snobow kids": "snowboard-kids-2",
+    "goemon's great adventure": "mystical-ninja-2-starring-goemon",
+    "goemons great adventure": "mystical-ninja-2-starring-goemon",
+    "fighters destiny": "fighters-destiny",
+    "roadsters trophy": "roadsters",
+    "puzzle bobble 64": "bust-a-move-99",
+    "quake 64": "quake-ii",
+    "kobe bryant's nba courtside": "nba-courtside",
 }
 
 

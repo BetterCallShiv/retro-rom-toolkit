@@ -1163,6 +1163,112 @@ def process_category(
 """, flush=True)
     return auto_compress
 
+
+def process_database_file(
+    json_path,
+    output_dir=None,
+    download_threads=1,
+    use_aria2=True,
+    split_connections=8,
+    auto_compress=None,
+):
+    json_path = os.path.abspath(json_path)
+    if os.path.isdir(json_path):
+        dest_dir = json_path
+        json_path = os.path.join(dest_dir, "database.json")
+    else:
+        dest_dir = os.path.abspath(output_dir) if output_dir else os.path.dirname(json_path)
+
+    if not os.path.exists(json_path):
+        print(f"Error: Database file not found at: {json_path}")
+        return
+
+    with open(json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    if isinstance(data, dict):
+        category = data.get("platform") or data.get("category") or os.path.basename(dest_dir)
+        games = data.get("games") or data.get("priority_games") or []
+    else:
+        category = os.path.basename(dest_dir)
+        games = data
+
+    if not games:
+        print(f"Error: No games found in database file: {json_path}")
+        return
+
+    os.makedirs(dest_dir, exist_ok=True)
+    total_bytes = sum(g.get("size_bytes", 0) for g in games)
+    total_size_str = format_bytes(total_bytes)
+
+    aria2_avail = get_aria2_executable() if use_aria2 else None
+    engine_name = f"aria2 ({split_connections} split connections per file)" if aria2_avail else "Python requests"
+
+    print(f"""
+===================================
+          STARTING DOWNLOAD          
+===================================
+ Category            : {category}
+ Games to Download   : {len(games)}
+ Total Download Size : {total_size_str}
+ Destination Folder  : {dest_dir}
+ Download Engine     : {engine_name}
+ Download Threads    : {download_threads} parallel workers
+ Auto-Compress       : {'Enabled' if auto_compress else 'Disabled'}
+ Database File       : {json_path}
+===================================
+""", flush=True)
+
+    file_lock = threading.Lock()
+    with _claimed_lock:
+        _claimed_filenames.clear()
+
+    ui = UniversalProgress(
+        total_games=len(games),
+        total_bytes=total_bytes,
+        completed_games=0,
+        completed_bytes=0,
+    )
+
+    successful = 0
+    watcher = HotkeyWatcher()
+    watcher.start()
+    try:
+        with ThreadPoolExecutor(max_workers=download_threads) as ex:
+            futs = [
+                ex.submit(
+                    download_single_file,
+                    g,
+                    dest_dir,
+                    ui,
+                    file_lock,
+                    False,
+                    use_aria2,
+                    split_connections,
+                    auto_compress,
+                )
+                for g in games
+            ]
+            for fut in as_completed(futs):
+                if fut.result():
+                    successful += 1
+    finally:
+        watcher.stop()
+        if ui:
+            ui.close()
+
+    print(f"""
+===================================
+          DOWNLOAD COMPLETE!         
+===================================
+ Successfully Downloaded : {successful} / {len(games)} games
+ Total Size              : {total_size_str}
+ Folder Location         : {dest_dir}
+ Metadata JSON File      : {json_path}
+===================================
+""", flush=True)
+    return auto_compress
+
 def main():
     parser = argparse.ArgumentParser(
         description="High-throughput scraper and downloader for retro ROMs with database generation."
@@ -1238,12 +1344,34 @@ def main():
 """)
 
     urls = []
+    target_json = None
     if args.urls:
         for u_arg in args.urls:
             for part in re.split(r"[,;\s]+", u_arg):
                 p = part.strip().strip("'\"")
                 if p.startswith("http"):
                     urls.append(p)
+                elif p.endswith(".json") and os.path.exists(p):
+                    target_json = p
+                elif os.path.isdir(p) and os.path.exists(os.path.join(p, "database.json")):
+                    target_json = os.path.join(p, "database.json")
+
+    if not target_json and args.output_dir:
+        cand = os.path.join(args.output_dir, "database.json")
+        if os.path.exists(cand):
+            target_json = cand
+
+    if target_json and not urls:
+        user_compress = args.compress
+        process_database_file(
+            json_path=target_json,
+            output_dir=args.output_dir or os.path.dirname(target_json),
+            download_threads=args.download_threads,
+            use_aria2=not args.no_aria2,
+            split_connections=args.split_connections,
+            auto_compress=user_compress,
+        )
+        return
 
     if not urls:
         if args.auto or args.metadata_only:
