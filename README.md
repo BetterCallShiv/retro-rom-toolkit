@@ -19,7 +19,7 @@ Retro ROM Toolkit provides three standalone tools designed to work together or i
 ## ✨ Features
 
 ### 1. Game Scraper & Downloader (rom_scraper.py)
-- **Fast Multi-Connection Downloads**: Uses aria2 to open up to 16 connections per file for maximum download speed.
+- **Fast Accelerated Downloads**: Powered by aria2 for stable, high-speed downloads.
 - **Automatic Fallback**: Falls back to standard Python downloads if aria2 is not installed.
 - **Link Refresh**: Automatically refreshes download links if a link expires during long downloads.
 - **Metadata Mode**: Build a complete list of games and file sizes (database.json) without downloading the files.
@@ -73,7 +73,7 @@ python rom_scraper.py "https://www.romsgames.net/roms/playstation-portable/?page
 #### Download a complete system automatically
 
 ```bash
-python rom_scraper.py "https://www.romsgames.net/roms/gameboy-advance/?page=1&sort=popularity" --auto -t 30 -d 8
+python rom_scraper.py "https://www.romsgames.net/roms/gameboy-advance/?page=1&sort=popularity" --auto -t 30 -d 1
 ```
 
 #### Available Options
@@ -82,9 +82,10 @@ python rom_scraper.py "https://www.romsgames.net/roms/gameboy-advance/?page=1&so
 | :--- | :--- | :--- |
 | `-o`, `--output-dir` | Folder where games and database will be saved | Current directory |
 | `-t`, `--scrape-threads` | Number of worker threads used to scan web pages | `30` |
-| `-d`, `--download-threads` | Number of games to download at the same time | `8` |
-| `-s`, `--split-connections` | Number of download connections per file (for aria2) | `16` |
-| `-c`, `--compress` | Automatically compress downloaded games based on their format | `False` |
+| `-d`, `--download-threads` | Number of games to download at the same time | `1` |
+| `-s`, `--split-connections` | Number of download connections per file (for aria2) | `8` |
+| `-c`, `--compress` | Automatically compress downloaded games without prompting | Prompts if omitted |
+| `--no-compress` | Keep downloads as-is and skip compression prompt | `False` |
 | `-m`, `--metadata-only` | Only build database.json, download zero game files | `False` |
 | `-a`, `--auto` | Skip confirmation prompts and download everything | `False` |
 | `-r`, `--refresh-cache` | Ignore saved database.json and scrape fresh data | `False` |

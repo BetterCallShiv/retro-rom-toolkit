@@ -4,15 +4,14 @@
 #   Script: Retro ROM Compressor
 #   Author: @BetterCallShiv
 #   Features: 
-#       - Automatically identifies console platform from archives & disc headers.
-#       - PSP: Automatically compresses ISOs to high-performance .cso (CISO).
-#       - PS2: Automatically compresses DVD/CD images to .chd (createdvd/createcd).
-#       - PS1 / Sega: Automatically converts CUE/BIN/ECM to verified .chd (createcd).
-#       - Extracts .zip, .7z and .rar archives before converting.
-#       - Decompresses .ecm files and auto-generates missing .cue sheets on the fly.
-#       - Strict integrity verification (chdman verify) before removing original files.
-#       - Zero hardcoded paths: auto-prompts to download dependencies if missing.
-#       - Multi-threaded batch conversion support for entire game libraries.
+#       - Automatically identifies console platform from archives & disc headers
+#       - PSP: Automatically compresses ISOs to high-performance .cso (CISO)
+#       - PS2: Automatically compresses DVD/CD images to .chd
+#       - PS1 / Sega: Automatically converts CUE/BIN/ECM to verified .chd
+#       - Extracts .zip, .7z and .rar archives before converting
+#       - Decompresses .ecm files and auto-generates missing .cue files
+#       - Strict integrity verification (chdman verify) before removing original files
+#       - Multi-threaded batch conversion support for entire game libraries
 #   How to Use:
 #       1. Run on any library folder: python rom_compressor.py "path/to/roms"
 #       2. Or compress a single game: python rom_compressor.py "game.zip"
@@ -52,6 +51,10 @@ def find_tool(name):
     found = shutil.which(name) or shutil.which(f"{name}.exe")
     if found:
         return found
+    if name == "7z":
+        alt = shutil.which("7za") or shutil.which("7zr") or shutil.which("7za.exe")
+        if alt:
+            return alt
     script_dir = os.path.dirname(os.path.abspath(__file__))
     candidates = [
         os.path.join(script_dir, f"{name}.exe"),
@@ -59,6 +62,13 @@ def find_tool(name):
         os.path.join(script_dir, "tools", f"{name}.exe"),
         os.path.join(script_dir, "tools", name),
     ]
+    if name == "7z":
+        candidates.extend([
+            os.path.join(script_dir, "7za.exe"),
+            os.path.join(script_dir, "7za"),
+            os.path.join(script_dir, "tools", "7za.exe"),
+            os.path.join(script_dir, "tools", "7za"),
+        ])
     for c in candidates:
         if c and os.path.isfile(c):
             return c
@@ -124,8 +134,9 @@ def auto_download_chdman(target_dir=None):
         "linux": "@emmercm/chdman-linux-x64",
     }
     pkg = pkg_map.get(sys.platform, "@emmercm/chdman-win32-x64")
+    plat_label = "Windows (64-bit)" if sys.platform == "win32" else ("macOS" if sys.platform == "darwin" else "Linux")
     metadata_url = f"https://registry.npmjs.org/{pkg}/latest"
-    print(f"[*] Fetching chdman package metadata...", flush=True)
+    print(f"[*] Fetching chdman binary for {plat_label}...", flush=True)
     req = urllib.request.Request(metadata_url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req, timeout=15) as resp:
         data = json.loads(resp.read().decode())
@@ -200,12 +211,15 @@ def auto_download_maxcso(target_dir=None):
     is_arm = "arm" in machine or "aarch64" in machine
     if sys.platform == "win32":
         pkg = "@emmercm/maxcso-win32-x64"
+        plat_label = "Windows (64-bit)"
     elif sys.platform == "darwin":
         pkg = "@emmercm/maxcso-darwin-arm64" if is_arm else "@emmercm/maxcso-darwin-x64"
+        plat_label = f"macOS ({'Apple Silicon ARM64' if is_arm else 'Intel x64'})"
     else:
         pkg = "@emmercm/maxcso-linux-arm64" if is_arm else "@emmercm/maxcso-linux-x64"
+        plat_label = f"Linux ({'ARM64' if is_arm else 'x64'})"
     metadata_url = f"https://registry.npmjs.org/{pkg}/latest"
-    print(f"[*] Fetching maxcso binary for {sys.platform} ({machine})...", flush=True)
+    print(f"[*] Fetching maxcso binary for {plat_label}...", flush=True)
     try:
         req = urllib.request.Request(metadata_url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=15) as resp:
@@ -387,21 +401,22 @@ def compress_rom(src_path, dest_dir=None, keep_source=False, num_threads=None):
                     psp_iso = iso
                     break
         if is_psp and psp_iso:
+            raw_iso_size = os.path.getsize(psp_iso) if os.path.exists(psp_iso) else src_size
             target_cso = os.path.join(dest_dir, f"{base_title}.cso")
             temp_cso = os.path.join(work_dir, "output.cso")
             ok_cso = compress_iso_to_cso(psp_iso, temp_cso)
             if not ok_cso or not os.path.exists(temp_cso):
-                return False, "PSP CSO compression failed", src_size, 0, []
+                return False, "PSP CSO compression failed", raw_iso_size, 0, []
             if os.path.exists(target_cso):
                 os.remove(target_cso)
             shutil.move(temp_cso, target_cso)
-            chd_size = os.path.getsize(target_cso)
+            cso_size = os.path.getsize(target_cso)
             if not keep_source and ext in (".zip", ".7z", ".rar") and os.path.exists(src_path):
                 try:
                     os.remove(src_path)
                 except OSError:
                     pass
-            return True, "PSP CSO Compressed", src_size, chd_size, [target_cso]
+            return True, "PSP CSO Compressed", raw_iso_size, cso_size, [target_cso]
         if cart_files and not iso_files and not cue_files:
             created = []
             for cf in cart_files:
@@ -502,6 +517,10 @@ def compress_rom(src_path, dest_dir=None, keep_source=False, num_threads=None):
                     input_discs.append((gen_cue, "createcd"))
         if not input_discs:
             return False, "No convertible disc image or .cue sheet found", src_size, 0, []
+        raw_disc_bytes = sum(
+            os.path.getsize(f) for f in all_now
+            if f.lower().endswith((".bin", ".iso", ".img", ".mdf", ".raw"))
+        ) or src_size
         created_chds = []
         cpus = str(num_threads or os.cpu_count() or 4)
         for idx, (disc_input, cmd_mode) in enumerate(input_discs, 1):
@@ -544,7 +563,7 @@ def compress_rom(src_path, dest_dir=None, keep_source=False, num_threads=None):
                 os.remove(src_path)
             except OSError:
                 pass
-        return True, "CHD Verified", src_size, total_chd_bytes, created_chds
+        return True, "CHD Verified", raw_disc_bytes, total_chd_bytes, created_chds
     finally:
         with _lock:
             _active_work_dirs.discard(work_dir)

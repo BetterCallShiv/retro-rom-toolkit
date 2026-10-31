@@ -4,15 +4,15 @@
 #   Script: Retro ROM Ranker
 #   Author: @BetterCallShiv
 #   Features: 
-#       - Sorts entire ROM libraries from best to worst in descending quality order.
-#       - Multi-account session leasing pool to bypass ScreenScraper 1-thread limit.
-#       - Auto-detects console platforms (PSP, PS1, Game Boy, GBA, SNES, etc.).
-#       - Dynamic Hall of Fame leaderboard preview.
+#       - Sorts entire ROM libraries from best to worst in descending quality order
+#       - Multi-account session leasing pool to bypass ScreenScraper 1-thread limit
+#       - Auto-detects console platforms (PSP, PS1, Game Boy, GBA, SNES, etc.)
+#       - Dynamic Hall of Fame leaderboard preview
 #   How to Use:
 #       1. Install the required packages: pip install requests beautifulsoup4
 #       2. Add your ScreenScraper account: python rom_ranker.py --add-account "USER" "PASS"
 #       3. Run the script in your library folder: python rom_ranker.py -t 15
-#       4. Check the generated sorted_database.json for your ranked collection.
+#       4. Check the generated sorted_database.json for your ranked collection
 ##########################################################################
 
 import argparse

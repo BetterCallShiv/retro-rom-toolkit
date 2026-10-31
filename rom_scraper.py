@@ -4,16 +4,17 @@
 #   Script: RomsGames Scraper & Bulk Downloader
 #   Author: @BetterCallShiv
 #   Features: 
-#       - Scrapes complete game libraries & file sizes directly from romsgames.net.
-#       - Turbo multi-connection downloads powered by pip aria2 package (16 parallel connections per file).
-#       - Generates structured database.json files with direct download endpoints.
-#       - Metadata-only mode (--metadata-only) to catalog collections without downloading.
+#       - Scrapes complete game libraries & file sizes directly from romsgames.net
+#       - High-speed multi-connection downloads powered by aria2 package
+#       - Generates structured database.json files with direct download endpoints
+#       - Metadata-only mode (--metadata-only) to catalog collections without downloading
+#       - Automatic compression prompt / pipeline for converting downloads into .chd / .cso / extracted ROMs
 #   How to Use:
 #       1. Install the required packages: pip install requests beautifulsoup4 tqdm aria2
 #       2. Run the script in your terminal: python rom_scraper.py
 #       3. Or pass a link directly:
 #          python rom_scraper.py "https://www.romsgames.net/roms/playstation-portable/?page=1&sort=popularity"
-#       4. Check your console folder for downloaded ROMs and database.json.
+#       4. Check your console folder for downloaded ROMs and database.json
 ##########################################################################
 
 import argparse
@@ -46,6 +47,10 @@ except ImportError:
 
 if sys.platform == "win32":
     try:
+        os.system("")
+    except Exception:
+        pass
+    try:
         import ctypes
     except ImportError:
         ctypes = None
@@ -69,7 +74,7 @@ if hasattr(sys.stdout, "reconfigure"):
         pass
 
 SCRAPE_WORKERS = 30
-DOWNLOAD_WORKERS = 8
+DOWNLOAD_WORKERS = 1
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -275,6 +280,20 @@ def format_bytes(num_bytes):
         b /= 1024.0
     return f"{b:.2f} PB"
 
+def format_eta(seconds):
+    if seconds is None or seconds < 0 or seconds > 86400 * 7:
+        return "--:--"
+    m, s = divmod(int(seconds), 60)
+    h, m = divmod(m, 60)
+    if h > 0:
+        return f"{h}h {m:02d}m {s:02d}s"
+    return f"{m:02d}m {s:02d}s"
+
+def make_bar(percent, width=16):
+    percent = max(0.0, min(1.0, percent))
+    filled = int(width * percent)
+    return "█" * filled + "░" * (width - filled)
+
 def parse_detail(html):
     soup = BeautifulSoup(html, "html.parser")
     ids = [el["data-media-id"] for el in soup.select("[data-media-id]") if el["data-media-id"].strip()]
@@ -401,13 +420,21 @@ def trigger_download(game_url, media_id, delay=0.1):
     return "", ""
 
 def load_games_json(dest_dir):
-    json_path = os.path.join(dest_dir, "database.json")
-    if os.path.exists(json_path):
-        try:
-            with open(json_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
+    candidates = [
+        os.path.join(dest_dir, "database.json"),
+        os.path.join(os.getcwd(), "database.json"),
+    ]
+    for json_path in candidates:
+        if json_path and os.path.isfile(json_path):
+            try:
+                with open(json_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict) and (data.get("games") or data.get("priority_games")):
+                        return data
+                    if isinstance(data, list) and len(data) > 0:
+                        return {"games": data}
+            except Exception:
+                continue
     return {}
 
 def save_games_json(dest_dir, category, url, games_list):
@@ -481,29 +508,151 @@ def _deduplicate_filename(filename, dest_dir):
         _claimed_filenames.add(candidate.lower())
     return candidate
 
-def _finalize_saved_file(dest_path, dest_dir, game, auto_compress=False):
+class UniversalProgress:
+    def __init__(self, total_games, total_bytes, completed_games=0, completed_bytes=0):
+        self.total_games = total_games
+        self.total_bytes = max(1, total_bytes)
+        self.completed_games = completed_games
+        self.completed_bytes = completed_bytes
+        self.rendered_lines = 0
+        self._lock = threading.Lock()
+
+    def _render(self, line1, line2):
+        with self._lock:
+            try:
+                cols = shutil.get_terminal_size((80, 24)).columns
+            except Exception:
+                cols = 80
+            max_w = max(40, cols - 1)
+
+            l1 = line1[:max_w]
+            l2 = line2[:max_w]
+
+            if self.rendered_lines == 3:
+                sys.stdout.write(f"\033[2A\r\033[K\n\r\033[K{l1}\n\r\033[K{l2}")
+            else:
+                sys.stdout.write(f"\n\r\033[K{l1}\n\r\033[K{l2}")
+                self.rendered_lines = 3
+            sys.stdout.flush()
+
+    def update(self, current_title, current_done, current_total, speed_bps):
+        curr_pct = (current_done / current_total * 100) if current_total > 0 else 0.0
+        speed_str = f"{format_bytes(speed_bps)}/s" if speed_bps > 0 else "--/s"
+        rem_bytes = max(0, current_total - current_done)
+        eta_sec = (rem_bytes / speed_bps) if speed_bps > 0 else None
+        eta_str = format_eta(eta_sec)
+        curr_mb = f"{current_done / (1024**2):.0f}MB/{current_total / (1024**2):.0f}MB"
+
+        line1 = f"> {current_title}: {curr_pct:.0f}% ({curr_mb}) {speed_str} ETA:{eta_str}"
+
+        overall_done_b = self.completed_bytes + current_done
+        overall_pct = min(1.0, overall_done_b / self.total_bytes)
+        overall_gb = overall_done_b / (1024 ** 3)
+        total_gb = self.total_bytes / (1024 ** 3)
+
+        bar_len = 16
+        bar_str = f"[{make_bar(overall_pct, bar_len)}]"
+        line2 = f"Overall: [{self.completed_games}/{self.total_games} | {overall_gb:.1f}/{total_gb:.1f}GB {overall_pct*100:.0f}%] {bar_str}"
+
+        self._render(line1, line2)
+
+    def update_stage(self, current_title, stage_msg):
+        line1 = f"> {current_title} -> [{stage_msg}]"
+
+        overall_done_b = self.completed_bytes
+        overall_pct = min(1.0, overall_done_b / self.total_bytes)
+        overall_gb = overall_done_b / (1024 ** 3)
+        total_gb = self.total_bytes / (1024 ** 3)
+
+        bar_len = 16
+        bar_str = f"[{make_bar(overall_pct, bar_len)}]"
+        line2 = f"Overall: [{self.completed_games}/{self.total_games} | {overall_gb:.1f}/{total_gb:.1f}GB {overall_pct*100:.0f}%] {bar_str}"
+
+        self._render(line1, line2)
+
+    def print_log(self, msg):
+        with self._lock:
+            if self.rendered_lines == 3:
+                sys.stdout.write("\033[2A\r\033[K\n\r\033[K\n\r\033[K\033[2A\r\033[K")
+                self.rendered_lines = 0
+            sys.stdout.write(f"{msg}\n")
+            sys.stdout.flush()
+
+    def game_finished(self, log_msg, completed_bytes_delta=0):
+        with self._lock:
+            if self.rendered_lines == 3:
+                sys.stdout.write("\033[2A\r\033[K\n\r\033[K\n\r\033[K\033[2A\r\033[K")
+                self.rendered_lines = 0
+            self.completed_games += 1
+            if completed_bytes_delta > 0:
+                self.completed_bytes += completed_bytes_delta
+            sys.stdout.write(f"  ✓ {log_msg}\n")
+            sys.stdout.flush()
+
+    def close(self):
+        with self._lock:
+            if self.rendered_lines == 3:
+                sys.stdout.write("\033[2A\r\033[K\n\r\033[K\n\r\033[K\033[2A\r\033[K")
+                self.rendered_lines = 0
+            sys.stdout.flush()
+
+def log_msg(msg, ui=None):
+    if ui and hasattr(ui, "print_log"):
+        ui.print_log(msg)
+    elif ui and hasattr(ui, "write"):
+        ui.write(msg)
+    elif tqdm and hasattr(tqdm, "write"):
+        tqdm.write(msg)
+    else:
+        print(msg, flush=True)
+
+def _finalize_saved_file(dest_path, dest_dir, game, auto_compress=False, ui=None):
     saved_size = os.path.getsize(dest_path)
-    print(f"  [OK] Saved: {game['filename']} ({format_bytes(saved_size)})", flush=True)
 
     if auto_compress and dest_path.lower().endswith((".zip", ".7z", ".rar", ".bin", ".cue", ".iso", ".img")):
         if not compress_rom:
-            print("  [COMPRESS NOTE] rom_compressor module not found for conversion.", flush=True)
+            if ui and hasattr(ui, "game_finished"):
+                ui.game_finished(f"Saved: {game['filename']} ({format_bytes(saved_size)})", saved_size)
+            else:
+                log_msg(f"  ✓ Saved: {game['filename']} ({format_bytes(saved_size)})", ui)
             game["status"] = "downloaded"
             return True
         try:
-            print(f"  [IDENTIFYING & COMPRESSING] Processing {game['filename']}...", flush=True)
+            if ui and hasattr(ui, "update_stage"):
+                ui.update_stage(game["filename"], "Compressing...")
+            else:
+                log_msg(f"  [IDENTIFYING & COMPRESSING] Processing {game['filename']}...", ui)
             ok_c, msg_c, sz_orig, sz_final, created_outs = compress_rom(dest_path, dest_dir, keep_source=False)
             if ok_c and created_outs:
                 out_names = ", ".join(os.path.basename(c) for c in created_outs)
-                print(f"  [READY: {msg_c}] {out_names} ({format_bytes(sz_final)} from {format_bytes(sz_orig)})", flush=True)
+                if sz_orig > sz_final and sz_orig > 0:
+                    pct_saved = round((1.0 - (sz_final / sz_orig)) * 100)
+                    ratio_str = f"{format_bytes(sz_final)} from {format_bytes(sz_orig)} raw, {pct_saved:.0f}% saved"
+                else:
+                    ratio_str = f"{format_bytes(sz_final)} from {format_bytes(sz_orig)}"
+                if ui and hasattr(ui, "game_finished"):
+                    ui.game_finished(f"[READY: {msg_c}] {out_names} ({ratio_str})", saved_size)
+                else:
+                    log_msg(f"  ✓ [READY: {msg_c}] {out_names} ({ratio_str})", ui)
                 game["compressed_files"] = [os.path.basename(c) for c in created_outs]
                 game["filename"] = os.path.basename(created_outs[0])
                 game["size_bytes"] = sz_final
                 game["size"] = format_bytes(sz_final)
             else:
-                print(f"  [COMPRESS NOTE] Could not compress: {msg_c}", flush=True)
+                if ui and hasattr(ui, "game_finished"):
+                    ui.game_finished(f"Saved: {game['filename']} ({format_bytes(saved_size)})", saved_size)
+                else:
+                    log_msg(f"  ✓ Saved: {game['filename']} ({format_bytes(saved_size)})", ui)
         except Exception as ec:
-            print(f"  [COMPRESS NOTE] Error during compression: {ec}", flush=True)
+            if ui and hasattr(ui, "game_finished"):
+                ui.game_finished(f"Saved: {game['filename']} ({format_bytes(saved_size)}) [compress error: {ec}]", saved_size)
+            else:
+                log_msg(f"  ✓ Saved: {game['filename']} ({format_bytes(saved_size)})", ui)
+    else:
+        if ui and hasattr(ui, "game_finished"):
+            ui.game_finished(f"Saved: {game['filename']} ({format_bytes(saved_size)})", saved_size)
+        else:
+            log_msg(f"  ✓ Saved: {game['filename']} ({format_bytes(saved_size)})", ui)
 
     game["status"] = "downloaded"
     return True
@@ -511,8 +660,8 @@ def _finalize_saved_file(dest_path, dest_dir, game, auto_compress=False):
 def download_single_file(
     game,
     dest_dir,
-    progress_bar,
-    file_lock,
+    ui=None,
+    file_lock=None,
     overwrite=False,
     use_aria2=True,
     split_connections=16,
@@ -523,9 +672,10 @@ def download_single_file(
     dest_path = os.path.join(dest_dir, game["filename"])
 
     if not overwrite and os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
-        print(f"  [SKIP] Already exists: {game['filename']}", flush=True)
-        if progress_bar and game.get("size_bytes", 0) > 0:
-            progress_bar.update(game["size_bytes"])
+        if ui and hasattr(ui, "game_finished"):
+            ui.game_finished(f"Already exists: {game['filename']}", game.get("size_bytes", 0))
+        else:
+            log_msg(f"  ✓ Already exists: {game['filename']}", ui)
         game["status"] = "downloaded"
         return True
 
@@ -537,7 +687,7 @@ def download_single_file(
                 dl_url = fresh_url
                 game["download_url"] = fresh_url
         if not dl_url:
-            print(f"  [NO LINK] {game['title']} (Missing download URL)", flush=True)
+            log_msg(f"  [NO LINK] {game['title']} (Missing download URL)", ui)
             game["status"] = "failed"
             return False
 
@@ -552,9 +702,9 @@ def download_single_file(
     aria2_ctrl_path = temp_path + ".aria2"
 
     aria2_bin = get_aria2_executable() if use_aria2 else None
-    size_label = game.get("size") or format_bytes(game.get("size_bytes", 0))
-    engine_label = f"aria2 [{split_connections}x]" if aria2_bin else "requests"
-    print(f"  [DOWNLOADING ({engine_label})] {game['filename']} ({size_label})...", flush=True)
+
+    if ui and hasattr(ui, "update"):
+        ui.update(game["filename"], 0, game.get("size_bytes", 0), 0)
 
     max_retries = 4
     for attempt in range(max_retries):
@@ -568,10 +718,10 @@ def download_single_file(
                     "-s", str(min(16, max(1, split_connections))),
                     "-k", "1M",
                     "--file-allocation=none",
-                    "--summary-interval=0",
+                    "--summary-interval=1",
+                    "--show-console-readout=false",
                     "--console-log-level=warn",
                     "--download-result=hide",
-                    "--quiet=true",
                     "--allow-overwrite=true",
                     "--auto-file-renaming=false",
                     "--dir", dest_dir,
@@ -579,32 +729,48 @@ def download_single_file(
                     dl_url,
                 ]
 
-                proc = subprocess.Popen(cmd)
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    bufsize=1,
+                )
                 with _active_procs_lock:
                     _active_procs.add(proc)
 
-                last_size = 0
-                while proc.poll() is None:
-                    time.sleep(0.3)
-                    if os.path.exists(temp_path):
-                        try:
-                            curr_size = os.path.getsize(temp_path)
-                            delta = curr_size - last_size
-                            if delta > 0:
-                                if progress_bar:
-                                    progress_bar.update(delta)
-                                last_size = curr_size
-                        except OSError:
-                            pass
+                mults = {
+                    "b": 1,
+                    "k": 1024, "kib": 1024, "kb": 1024,
+                    "m": 1024**2, "mib": 1024**2, "mb": 1024**2,
+                    "g": 1024**3, "gib": 1024**3, "gb": 1024**3,
+                }
+                total_file_bytes = game.get("size_bytes", 0)
 
+                if proc.stdout:
+                    for line in proc.stdout:
+                        m_bytes = re.search(r'\[#\w+\s+([\d\.]+)([A-Za-z]+)/', line)
+                        m_speed = re.search(r'DL:([\d\.]+)([A-Za-z]+)', line)
+                        speed_bps = 0
+                        if m_speed:
+                            try:
+                                speed_bps = int(float(m_speed.group(1)) * mults.get(m_speed.group(2).lower(), 1))
+                            except Exception:
+                                pass
+                        if m_bytes:
+                            val_str, unit_str = m_bytes.groups()
+                            try:
+                                curr_bytes = int(float(val_str) * mults.get(unit_str.lower(), 1))
+                                if ui and hasattr(ui, "update"):
+                                    ui.update(game["filename"], curr_bytes, total_file_bytes or curr_bytes, speed_bps)
+                            except (ValueError, TypeError):
+                                pass
+
+                proc.wait()
                 with _active_procs_lock:
                     _active_procs.discard(proc)
 
                 if proc.returncode == 0 and os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
-                    final_bytes = os.path.getsize(temp_path)
-                    if progress_bar and final_bytes > last_size:
-                        progress_bar.update(final_bytes - last_size)
-
                     if os.path.exists(aria2_ctrl_path):
                         try:
                             os.remove(aria2_ctrl_path)
@@ -616,7 +782,7 @@ def download_single_file(
                             os.remove(dest_path)
                         os.replace(temp_path, dest_path)
 
-                    return _finalize_saved_file(dest_path, dest_dir, game, auto_compress)
+                    return _finalize_saved_file(dest_path, dest_dir, game, auto_compress, ui)
 
                 if os.path.exists(temp_path):
                     try:
@@ -630,7 +796,7 @@ def download_single_file(
                         pass
 
                 if attempt < max_retries - 1 and game.get("media_id"):
-                    print(f"  [REFRESHING LINK] {game['filename']} (CDN token expired, refreshing...)", flush=True)
+                    log_msg(f"  [REFRESHING LINK] {game['filename']} (CDN token expired, refreshing...)", ui)
                     fresh_url, _ = trigger_download(game["url"], game["media_id"])
                     if fresh_url:
                         dl_url = fresh_url
@@ -651,32 +817,42 @@ def download_single_file(
         try:
             with session.get(dl_url, headers=headers, stream=True, timeout=(10, 35)) as r:
                 if r.status_code in (403, 410, 503) and attempt < max_retries - 1 and game.get("media_id"):
-                    print(f"  [REFRESHING LINK] {game['filename']} (CDN token expired, refreshing...)", flush=True)
+                    log_msg(f"  [REFRESHING LINK] {game['filename']} (CDN token expired, refreshing...)", ui)
                     fresh_url, _ = trigger_download(game["url"], game["media_id"])
                     if fresh_url:
                         dl_url = fresh_url
                         game["download_url"] = fresh_url
                         continue
                 if r.status_code != 200:
-                    print(f"  [HTTP {r.status_code}] Failed to download: {game['filename']}", flush=True)
+                    log_msg(f"  [HTTP {r.status_code}] Failed to download: {game['filename']}", ui)
                     game["status"] = "failed"
                     return False
                 total_len = int(r.headers.get("content-length", 0))
                 if game.get("size_bytes", 0) == 0 and total_len > 0:
                     game["size_bytes"] = total_len
                     game["size"] = format_bytes(total_len)
+                downloaded = 0
+                t_last = time.time()
+                last_b = 0
                 with open(temp_path, "wb") as f:
                     for chunk in r.iter_content(chunk_size=128 * 1024):
                         if chunk:
                             f.write(chunk)
-                            if progress_bar:
-                                progress_bar.update(len(chunk))
+                            downloaded += len(chunk)
+                            now = time.time()
+                            elapsed = now - t_last
+                            if elapsed >= 0.3:
+                                speed = int((downloaded - last_b) / elapsed) if elapsed > 0 else 0
+                                t_last = now
+                                last_b = downloaded
+                                if ui and hasattr(ui, "update"):
+                                    ui.update(game["filename"], downloaded, total_len, speed)
             if os.path.exists(temp_path):
                 with file_lock:
                     if os.path.exists(dest_path):
                         os.remove(dest_path)
                     os.replace(temp_path, dest_path)
-                return _finalize_saved_file(dest_path, dest_dir, game, auto_compress)
+                return _finalize_saved_file(dest_path, dest_dir, game, auto_compress, ui)
         except Exception as e:
             if os.path.exists(temp_path):
                 try:
@@ -685,10 +861,10 @@ def download_single_file(
                     pass
             if attempt < max_retries - 1:
                 wait = 3 * (2 ** attempt)
-                print(f"  [RETRY {attempt+1}/{max_retries}] {game['filename']}: {e} (waiting {wait}s...)", flush=True)
+                log_msg(f"  [RETRY {attempt+1}/{max_retries}] {game['filename']}: {e} (waiting {wait}s...)", ui)
                 time.sleep(wait)
             else:
-                print(f"  [ERROR] {game['filename']}: {e}", flush=True)
+                log_msg(f"  [ERROR] {game['filename']}: {e}", ui)
     game["status"] = "failed"
     return False
 
@@ -699,10 +875,10 @@ def process_category(
     auto=False,
     metadata_only=False,
     scrape_threads=30,
-    download_threads=8,
+    download_threads=1,
     use_aria2=True,
-    split_connections=16,
-    auto_compress=False,
+    split_connections=8,
+    auto_compress=None,
 ):
     try:
         base, path, category, page_url = parse_listing_url(listing_url)
@@ -768,9 +944,16 @@ def process_category(
                 watcher.stop()
         return collected
 
+    cached_list = cached_data.get("games") or cached_data.get("priority_games") or []
+    if isinstance(cached_data, list):
+        cached_list = cached_data
+
     all_listing_games = None
+    if cached_list:
+        all_listing_games = {g["url"]: g.get("title", "") for g in cached_list if g.get("url")}
+
     if cached_count >= total_games and cached_bytes > 0:
-        print(f"[Cache Hit] All {total_games:,} games already cached in JSON! Total Library Size: {format_bytes(cached_bytes)}\n")
+        print(f"[Cache Hit] All {total_games:,} games already cached in database! Total Library Size: {format_bytes(cached_bytes)}\n")
     else:
         if auto or metadata_only:
             ask_fetch = "y"
@@ -778,7 +961,10 @@ def process_category(
         else:
             ask_fetch = safe_input(f"Fetch total size for all {total_games:,} games & save database? (y/n) [default: y]:\n> ").lower()
         if ask_fetch in ("", "y", "yes"):
-            all_listing_games = get_listing_games(total_pages)
+            scraped_listing = get_listing_games(total_pages)
+            if all_listing_games is None:
+                all_listing_games = {}
+            all_listing_games.update(scraped_listing)
             all_items = list(all_listing_games.items())
             missing = [
                 (u, t) for u, t in all_items
@@ -834,7 +1020,7 @@ def process_category(
             if ans in ("0", "skip", "s", "none"):
                 json_path = os.path.join(dest_dir, "database.json")
                 print(f"\nSkipping download. Your metadata database is saved at: {json_path}")
-                return
+                return auto_compress
             if not ans or ans == "all":
                 wanted = total_games
                 break
@@ -843,11 +1029,20 @@ def process_category(
                 break
             print("Invalid input. Please enter a positive number, 'all' or '0' to skip.")
 
+    if auto_compress is None:
+        if not auto:
+            compress_ans = safe_input("Automatically compress/convert downloaded ROMs (.chd / .cso / clean)? (y/n) [default: n]:\n> ").strip().lower()
+            auto_compress = compress_ans in ("y", "yes")
+        else:
+            auto_compress = False
+
     pages_needed = max(1, math.ceil(wanted / per_page))
-    if all_listing_games is not None:
+    if all_listing_games is not None and len(all_listing_games) >= wanted:
         todo_games = list(all_listing_games.items())[:wanted]
     else:
         collected = get_listing_games(pages_needed)
+        if all_listing_games is not None:
+            collected.update(all_listing_games)
         todo_games = list(collected.items())[:wanted]
 
     need_scraping = [
@@ -901,6 +1096,7 @@ def process_category(
  Destination Folder  : {dest_dir}
  Download Engine     : {engine_name}
  Download Threads    : {download_threads} parallel workers
+ Auto-Compress       : {'Enabled (.cso / .chd / clean)' if auto_compress else 'Disabled'}
  Database File       : {json_path}
 ===================================
 """, flush=True)
@@ -909,19 +1105,12 @@ def process_category(
     with _claimed_lock:
         _claimed_filenames.clear()
 
-    progress_bar = None
-    if tqdm:
-        progress_bar = tqdm(
-            total=total_bytes if total_bytes > 0 else None,
-            unit="B",
-            unit_scale=True,
-            unit_divisor=1024,
-            desc="Overall Download",
-            file=sys.stdout,
-            dynamic_ncols=True,
-            ascii=True,
-            leave=True,
-        )
+    ui = UniversalProgress(
+        total_games=len(final_games),
+        total_bytes=total_bytes,
+        completed_games=0,
+        completed_bytes=0,
+    )
 
     successful = 0
     watcher = HotkeyWatcher()
@@ -933,7 +1122,7 @@ def process_category(
                     download_single_file,
                     g,
                     dest_dir,
-                    progress_bar,
+                    ui,
                     file_lock,
                     False,
                     use_aria2,
@@ -945,13 +1134,10 @@ def process_category(
             for fut in as_completed(futs):
                 if fut.result():
                     successful += 1
-                    if progress_bar:
-                        progress_bar.set_postfix_str(f"{successful}/{len(final_games)} done")
     finally:
         watcher.stop()
-
-    if progress_bar:
-        progress_bar.close()
+        if ui:
+            ui.close()
 
     save_games_json(dest_dir, category, listing_url, final_games)
     print(f"""
@@ -964,6 +1150,7 @@ def process_category(
  Metadata JSON File      : {json_path}
 ===================================
 """, flush=True)
+    return auto_compress
 
 def main():
     parser = argparse.ArgumentParser(
@@ -989,8 +1176,8 @@ def main():
     parser.add_argument(
         "-d", "--download-threads",
         type=int,
-        default=8,
-        help="Concurrent download worker threads (default: 8)",
+        default=1,
+        help="Concurrent download worker threads (default: 1)",
     )
     parser.add_argument(
         "-a", "--auto",
@@ -1015,14 +1202,21 @@ def main():
     parser.add_argument(
         "-s", "--split-connections",
         type=int,
-        default=16,
-        help="Split connections per file when using aria2 (default: 16)",
+        default=8,
+        help="Split connections per file when using aria2 (default: 8)",
     )
     parser.add_argument(
         "-c", "--compress", "--convert-chd",
         dest="compress",
         action="store_true",
+        default=None,
         help="Automatically compress downloaded games based on format (.cso for PSP, .chd for PS1/PS2, clean extraction for cartridge ROMs)",
+    )
+    parser.add_argument(
+        "--no-compress",
+        dest="compress",
+        action="store_false",
+        help="Disable automatic compression and skip interactive compression prompt",
     )
     args = parser.parse_args()
 
@@ -1056,6 +1250,8 @@ def main():
     if total_categories > 1:
         print(f"\n[+] Queued {total_categories} categories to process.")
 
+    user_compress = args.compress
+
     for idx, u in enumerate(urls, 1):
         if total_categories > 1:
             print(f"""
@@ -1064,7 +1260,7 @@ def main():
  URL: {u}
 ===================================
 """)
-        process_category(
+        chosen_compress = process_category(
             listing_url=u,
             output_base=args.output_dir,
             refresh_cache=args.refresh_cache,
@@ -1074,8 +1270,10 @@ def main():
             download_threads=args.download_threads,
             use_aria2=not args.no_aria2,
             split_connections=args.split_connections,
-            auto_compress=args.compress,
+            auto_compress=user_compress,
         )
+        if user_compress is None and chosen_compress is not None:
+            user_compress = chosen_compress
 
     if total_categories > 1:
         print(f"""
