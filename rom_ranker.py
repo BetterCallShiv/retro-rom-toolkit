@@ -325,6 +325,13 @@ def clean_title_for_screenscraper(raw_title):
     if dlc_clean and dlc_clean not in queries:
         queries.append(dlc_clean)
 
+    base_lower = base.lower()
+    for jp_k, alias in JP_WESTERN_ALIASES.items():
+        if jp_k in base_lower:
+            alias_title = alias.replace("-", " ").title()
+            if alias_title not in queries:
+                queries.append(alias_title)
+
     for delim in [":", " - "]:
         if delim in base:
             p1 = base.split(delim)[0].strip()
@@ -354,6 +361,9 @@ JP_WESTERN_ALIASES = {
     "ken to mahou to gakuen mono 2": "class-of-heroes-2",
     "yuusha no kuse ni namaikida": "what-did-i-do-to-deserve-this-my-lord",
     "yuusha no kuse ni namaikida or 2": "what-did-i-do-to-deserve-this-my-lord-2",
+    "taito memories pocket": "taito-legends-power-up",
+    "bleach soul carnival": "bleach-soul-carnival",
+    "bleach soul carnival 2": "bleach-soul-carnival-2",
 }
 
 
@@ -423,11 +433,22 @@ def fetch_metacritic(session, raw_title):
     slugs = generate_metacritic_slugs(raw_title)
     for slug in slugs:
         url = f"https://www.metacritic.com/game/{slug}/"
-        try:
-            r = session.get(url, headers=HEADERS, timeout=6)
-            if r.status_code != 200:
+        soup = None
+        for attempt in range(2):
+            try:
+                r = session.get(url, headers=HEADERS, timeout=10)
+                if r.status_code == 200:
+                    soup = BeautifulSoup(r.text, "html.parser")
+                    break
+                elif r.status_code == 404:
+                    break
+            except Exception:
+                if attempt == 0:
+                    time.sleep(0.5)
                 continue
-            soup = BeautifulSoup(r.text, "html.parser")
+        if not soup:
+            continue
+        try:
             hero = soup.find(class_="hero-scores")
             metascore = None
             sentiment = "Mixed or Average"
