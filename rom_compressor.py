@@ -169,20 +169,20 @@ def ensure_chdman(interactive=True):
         return CHDMAN_BIN
     script_dir = os.path.dirname(os.path.abspath(__file__))
     tools_dir = os.path.join(script_dir, "tools")
-    print(f"""
+    if interactive:
+        print(f"""
 ========================================================================
 [!] 'chdman' was not found in your system PATH or script directory.
     chdman is required to convert disc-based games into .chd files.
 ========================================================================
 """)
-    if interactive:
         try:
             choice = input(f"Would you like to auto-download chdman to '{tools_dir}'? (y/n) [default: y]: ").strip().lower()
         except (KeyboardInterrupt, EOFError):
             print("\n[!] Exited by user.")
             sys.exit(0)
     else:
-        choice = "n"
+        choice = "y"
     if choice in ("", "y", "yes"):
         try:
             downloaded = auto_download_chdman(tools_dir)
@@ -255,21 +255,21 @@ def ensure_maxcso(interactive=True):
         return MAXCSO_BIN
     script_dir = os.path.dirname(os.path.abspath(__file__))
     tools_dir = os.path.join(script_dir, "tools")
-    print(f"""
+    if interactive:
+        print(f"""
 ========================================================================
 [!] 'maxcso' was not found in your system PATH or script directory.
-Downlaod maxcso from the official GitHub repository:
+Download maxcso from the official GitHub repository:
 https://github.com/unknownbrackets/maxcso
 ========================================================================
 """)
-    if interactive:
         try:
             choice = input(f"Would you like to auto-download maxcso to '{tools_dir}'? (y/n) [default: y]: ").strip().lower()
         except (KeyboardInterrupt, EOFError):
             print("\n[!] Exited by user.")
             sys.exit(0)
     else:
-        choice = "n"
+        choice = "y"
     if choice in ("", "y", "yes"):
         try:
             downloaded = auto_download_maxcso(tools_dir)
@@ -689,10 +689,13 @@ def main():
             total_final_bytes += sz_final
             if ok:
                 success += 1
-                saved = sz_src - sz_final
-                saved_str = f"| Saved: {format_bytes(saved)}" if saved > 0 else ""
                 out_names = ", ".join(os.path.basename(c) for c in outs)
-                print(f"  [OK] {fn} -> {out_names} ({format_bytes(sz_final)} from {format_bytes(sz_src)} {saved_str})", flush=True)
+                if sz_src > sz_final and sz_src > 0:
+                    pct_saved = round((1.0 - (sz_final / sz_src)) * 100)
+                    ratio_str = f"{format_bytes(sz_src)} -> {format_bytes(sz_final)}, {pct_saved:.0f}% saved"
+                else:
+                    ratio_str = f"{format_bytes(sz_src)} -> {format_bytes(sz_final)}"
+                print(f"  [OK] {fn} -> {out_names} ({ratio_str})", flush=True)
             else:
                 failed += 1
                 print(f"  [FAILED] {fn}: {msg}", flush=True)

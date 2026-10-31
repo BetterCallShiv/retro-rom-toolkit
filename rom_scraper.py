@@ -543,7 +543,7 @@ class UniversalProgress:
         eta_str = format_eta(eta_sec)
         curr_mb = f"{current_done / (1024**2):.0f}MB/{current_total / (1024**2):.0f}MB"
 
-        line1 = f"> {current_title}: {curr_pct:.0f}% ({curr_mb}) {speed_str} ETA:{eta_str}"
+        line1 = f"> {current_title}: {curr_pct:.0f}% ({curr_mb}) | {speed_str} | ETA:{eta_str}"
 
         overall_done_b = self.completed_bytes + current_done
         overall_pct = min(1.0, overall_done_b / self.total_bytes)
@@ -627,9 +627,9 @@ def _finalize_saved_file(dest_path, dest_dir, game, auto_compress=False, ui=None
                 out_names = ", ".join(os.path.basename(c) for c in created_outs)
                 if sz_orig > sz_final and sz_orig > 0:
                     pct_saved = round((1.0 - (sz_final / sz_orig)) * 100)
-                    ratio_str = f"{format_bytes(sz_final)} from {format_bytes(sz_orig)}, {pct_saved:.0f}% saved"
+                    ratio_str = f"{format_bytes(sz_orig)} -> {format_bytes(sz_final)}, {pct_saved:.0f}% saved"
                 else:
-                    ratio_str = f"{format_bytes(sz_final)} from {format_bytes(sz_orig)}"
+                    ratio_str = f"{format_bytes(sz_orig)} -> {format_bytes(sz_final)}"
                 if ui and hasattr(ui, "game_finished"):
                     ui.game_finished(f"[READY: {msg_c}] {out_names} ({ratio_str})", saved_size)
                 else:
@@ -1031,10 +1031,21 @@ def process_category(
 
     if auto_compress is None:
         if not auto:
-            compress_ans = safe_input("Automatically compress/convert downloaded ROMs (.chd / .cso / clean)? (y/n) [default: n]:\n> ").strip().lower()
+            compress_ans = safe_input("Automatically compress/convert downloaded ROMs? (y/n) [default: n]:\n> ").strip().lower()
             auto_compress = compress_ans in ("y", "yes")
         else:
             auto_compress = False
+
+    if auto_compress:
+        try:
+            from rom_compressor import ensure_chdman, ensure_maxcso
+            cat_l = category.lower().replace("-", " ")
+            if "psp" in cat_l or "playstation portable" in cat_l:
+                ensure_maxcso(interactive=True)
+            elif any(k in cat_l for k in ["playstation", "ps1", "ps2", "psx", "saturn", "dreamcast", "sega cd", "segacd", "3do", "pc engine cd", "pcecd", "mega cd"]):
+                ensure_chdman(interactive=True)
+        except Exception:
+            pass
 
     pages_needed = max(1, math.ceil(wanted / per_page))
     if all_listing_games is not None and len(all_listing_games) >= wanted:
@@ -1083,7 +1094,7 @@ def process_category(
     total_size_str = format_bytes(total_bytes)
 
     aria2_avail = get_aria2_executable() if use_aria2 else None
-    engine_name = f"aria2 (pip module, {split_connections} split connections per file)" if aria2_avail else "Python requests (streaming)"
+    engine_name = f"aria2 ({split_connections} split connections per file)" if aria2_avail else "Python requests"
 
     print(f"\nSaved metadata database: {json_path}")
     print(f"""
