@@ -3,7 +3,6 @@ __pycache__/
 *$py.class
 
 # Scraped & downloaded ROMs
-playstation-portable/
 *.zip
 *.7z
 *.rar
@@ -11,11 +10,16 @@ playstation-portable/
 *.cso
 *.chd
 *.pbp
+*.tmp
+*.aria2
 
 # Configs
 screenscraper_config.json
-tools/
+
+# Binaries & Tools
 *.exe
+!tools/
+!tools/*.exe
 
 # Environment & editor
 .env

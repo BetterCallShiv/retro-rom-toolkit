@@ -77,7 +77,7 @@ def find_tool(name):
 
 CHDMAN_BIN = find_tool("chdman")
 MAXCSO_BIN = find_tool("maxcso")
-UNECM_BIN = find_tool("unecm")
+UNECM_BIN = find_tool("unecm") or find_tool("ecm-uncompress")
 SEVENZIP_BIN = find_tool("7z")
 FFMPEG_BIN = find_tool("ffmpeg")
 
@@ -292,6 +292,34 @@ https://github.com/unknownbrackets/maxcso
     return None
 
 
+def ensure_unecm(interactive=True):
+    global UNECM_BIN
+    if UNECM_BIN and os.path.isfile(UNECM_BIN):
+        return UNECM_BIN
+    found = find_tool("unecm") or find_tool("ecm-uncompress")
+    if found and os.path.isfile(found):
+        UNECM_BIN = found
+        return UNECM_BIN
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    tools_dir = os.path.join(script_dir, "tools")
+    if sys.platform == "darwin":
+        hint = "macOS: brew install ecm"
+    elif sys.platform.startswith("linux"):
+        hint = "Linux: sudo apt install ecm (Debian/Ubuntu) or sudo pacman -S ecm-tools (Arch)"
+    else:
+        hint = f"Windows: Place 'unecm.exe' in: {tools_dir} (or add to system PATH)"
+    if interactive:
+        print(f"""
+========================================================================
+[!] 'unecm' or 'ecm-uncompress' was not found.
+    It is required to decode .ecm sector files.
+    Manual installation:
+      {hint}
+========================================================================
+""")
+    return None
+
+
 def create_cue_sheet(bin_path, cue_path):
     bin_name = os.path.basename(bin_path)
     cue_content = f'FILE "{bin_name}" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n'
@@ -447,11 +475,13 @@ def compress_rom(src_path, dest_dir=None, keep_source=False, num_threads=None):
             return False, "chdman not found! Run 'python rom_compressor.py' to auto-download.", src_size, 0, []
         ecm_files = [f for f in extracted_files if f.lower().endswith(".ecm")]
         if ecm_files:
-            if not UNECM_BIN:
-                return False, "unecm executable required for .ecm sector files", src_size, 0, []
+            unecm_bin = ensure_unecm(interactive=False) or UNECM_BIN
+            if not unecm_bin:
+                hint = "brew install ecm" if sys.platform == "darwin" else ("sudo apt install ecm" if sys.platform.startswith("linux") else "place unecm.exe in tools/")
+                return False, f"unecm or ecm-uncompress required for .ecm files ({hint})", src_size, 0, []
             for ecm in ecm_files:
                 out_bin = os.path.splitext(ecm)[0]
-                res_u = subprocess.run([UNECM_BIN, ecm, out_bin], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                res_u = subprocess.run([unecm_bin, ecm, out_bin], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 if res_u.returncode != 0 or not os.path.exists(out_bin):
                     return False, f"Failed to decompress ECM file: {os.path.basename(ecm)}", src_size, 0, []
                 try:
@@ -641,7 +671,7 @@ def main():
         sys.exit(1)
     print(f"  chdman Engine : {chdman_tool}")
     print(f"  maxcso Engine : {MAXCSO_BIN or 'Auto-download on demand via GitHub'}")
-    print(f"  unecm Engine  : {UNECM_BIN or 'Not found (optional for .ecm)'}")
+    print(f"  unecm Engine  : {UNECM_BIN or 'Not found'}")
     print(f"  7z Engine     : {SEVENZIP_BIN or 'Not found (using zipfile fallback)'}")
     print("=" * 60)
     candidates = []
