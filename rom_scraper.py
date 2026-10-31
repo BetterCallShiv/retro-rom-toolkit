@@ -1096,7 +1096,7 @@ def process_category(
  Destination Folder  : {dest_dir}
  Download Engine     : {engine_name}
  Download Threads    : {download_threads} parallel workers
- Auto-Compress       : {'Enabled (.cso / .chd / clean)' if auto_compress else 'Disabled'}
+ Auto-Compress       : {'Enabled' if auto_compress else 'Disabled'}
  Database File       : {json_path}
 ===================================
 """, flush=True)
