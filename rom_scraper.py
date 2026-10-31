@@ -1030,11 +1030,8 @@ def process_category(
             print("Invalid input. Please enter a positive number, 'all' or '0' to skip.")
 
     if auto_compress is None:
-        if not auto:
-            compress_ans = safe_input("Automatically compress/convert downloaded ROMs? (y/n) [default: n]:\n> ").strip().lower()
-            auto_compress = compress_ans in ("y", "yes")
-        else:
-            auto_compress = False
+        compress_ans = safe_input("Automatically compress/convert downloaded ROMs? (y/n) [default: y]:\n> ").strip().lower()
+        auto_compress = compress_ans in ("", "y", "yes")
 
     if auto_compress:
         try:
@@ -1196,6 +1193,21 @@ def process_database_file(
     if not games:
         print(f"Error: No games found in database file: {json_path}")
         return
+
+    if auto_compress is None:
+        compress_ans = safe_input("Automatically compress/convert downloaded ROMs? (y/n) [default: y]:\n> ").strip().lower()
+        auto_compress = compress_ans in ("", "y", "yes")
+
+    if auto_compress:
+        try:
+            from rom_compressor import ensure_chdman, ensure_maxcso
+            cat_l = category.lower().replace("-", " ")
+            if "psp" in cat_l or "playstation portable" in cat_l:
+                ensure_maxcso(interactive=True)
+            elif any(k in cat_l for k in ["playstation", "ps1", "ps2", "psx", "saturn", "dreamcast", "sega cd", "segacd", "3do", "pc engine cd", "pcecd", "mega cd"]):
+                ensure_chdman(interactive=True)
+        except Exception:
+            pass
 
     os.makedirs(dest_dir, exist_ok=True)
     total_bytes = sum(g.get("size_bytes", 0) for g in games)
