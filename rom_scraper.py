@@ -323,7 +323,44 @@ def parse_detail(html):
         if m:
             file_size_str = m.group(1).strip()
     file_size_bytes = parse_size_to_bytes(file_size_str)
-    return title, "|".join(dict.fromkeys(ids)), file_size_str, file_size_bytes
+
+    user_rating = None
+    vote_count = None
+    for s in soup.find_all("script", type="application/ld+json"):
+        if s.string and "aggregateRating" in s.string:
+            try:
+                data = json.loads(s.string)
+                if isinstance(data, dict):
+                    agg = data.get("aggregateRating")
+                    if isinstance(agg, dict):
+                        r_val = agg.get("ratingValue")
+                        v_val = agg.get("ratingCount")
+                        if r_val is not None:
+                            user_rating = float(r_val)
+                        if v_val is not None:
+                            vote_count = int(v_val)
+                        if user_rating is not None and vote_count is not None:
+                            break
+            except Exception:
+                pass
+
+    if user_rating is None:
+        m_r = re.search(r'"ratingValue"\s*:\s*"?([\d.]+)"?', html)
+        if m_r:
+            try:
+                user_rating = float(m_r.group(1))
+            except Exception:
+                pass
+
+    if vote_count is None:
+        m_v = re.search(r'"ratingCount"\s*:\s*"?(\d+)"?', html)
+        if m_v:
+            try:
+                vote_count = int(m_v.group(1))
+            except Exception:
+                pass
+
+    return title, "|".join(dict.fromkeys(ids)), file_size_str, file_size_bytes, user_rating, vote_count
 
 def sanitize_filename(name, fallback="rom.zip"):
     if not name:
@@ -467,7 +504,7 @@ def scrape_game_worker(item, delay=0.1):
         html = fetch(url)
         if not html:
             return None
-        title, media_id, size_str, size_bytes = parse_detail(html)
+        title, media_id, size_str, size_bytes, rating, votes = parse_detail(html)
         first_id = media_id.split("|")[0].strip() if media_id else ""
         dl_url, dl_name = "", ""
         if first_id:
@@ -484,6 +521,8 @@ def scrape_game_worker(item, delay=0.1):
             "media_id": first_id,
             "size": size_str or (format_bytes(size_bytes) if size_bytes else "Unknown size"),
             "size_bytes": size_bytes,
+            "rating": rating,
+            "votes": votes,
             "download_url": dl_url,
             "filename": safe_name,
             "status": "pending",
@@ -879,6 +918,7 @@ def process_category(
     use_aria2=True,
     split_connections=8,
     auto_compress=None,
+    limit=None,
 ):
     try:
         base, path, category, page_url = parse_listing_url(listing_url)
@@ -955,23 +995,43 @@ def process_category(
     if cached_count >= total_games and cached_bytes > 0:
         print(f"[Cache Hit] All {total_games:,} games already cached in database! Total Library Size: {format_bytes(cached_bytes)}\n")
     else:
-        if auto or metadata_only:
-            ask_fetch = "y"
-            print(f"[AUTO] Fetching total size for all {total_games:,} games & saving database...", flush=True)
+        scrape_limit = None
+        if limit is not None and limit > 0:
+            scrape_limit = min(limit, total_games)
+            print(f"[*] Limit set by argument: fetching first {scrape_limit:,} of {total_games:,} games...", flush=True)
+        elif auto or metadata_only:
+            scrape_limit = total_games
+            print(f"[AUTO] Fetching metadata for all {total_games:,} games & saving database...", flush=True)
         else:
-            ask_fetch = safe_input(f"Fetch total size for all {total_games:,} games & save database? (y/n) [default: y]:\n> ").lower()
-        if ask_fetch in ("", "y", "yes"):
-            scraped_listing = get_listing_games(total_pages)
+            fetch_prompt = (
+                f"Enter number of games to fetch from web (e.g. 50, 500),\n"
+                f"'all' for all {total_games:,}, or '0' to skip [default: all]:\n> "
+            )
+            raw_ans = safe_input(fetch_prompt).strip().lower()
+            if raw_ans in ("", "all", "y", "yes"):
+                scrape_limit = total_games
+            elif raw_ans in ("0", "n", "no", "skip", "s", "none"):
+                scrape_limit = 0
+            else:
+                try:
+                    parsed_num = int(re.sub(r"[^\d]", "", raw_ans))
+                    scrape_limit = max(0, min(parsed_num, total_games))
+                except Exception:
+                    scrape_limit = total_games
+
+        if scrape_limit and scrape_limit > 0:
+            pages_needed = min(total_pages, math.ceil(scrape_limit / per_page)) if per_page else total_pages
+            scraped_listing = get_listing_games(pages_needed)
             if all_listing_games is None:
                 all_listing_games = {}
             all_listing_games.update(scraped_listing)
-            all_items = list(all_listing_games.items())
+            all_items = list(all_listing_games.items())[:scrape_limit]
             missing = [
                 (u, t) for u, t in all_items
                 if u not in cached_games_map or not cached_games_map[u].get("download_url")
             ]
             if missing:
-                print(f"\n[Scraping] Fetching sizes & download links for {len(missing):,} games with {scrape_threads} parallel threads...", flush=True)
+                print(f"\n[Scraping] Fetching sizes, ratings & download links for {len(missing):,} games with {scrape_threads} parallel threads...", flush=True)
                 watcher = HotkeyWatcher()
                 watcher.start()
                 try:
@@ -987,10 +1047,18 @@ def process_category(
                             if res:
                                 cached_games_map[res["url"]] = res
                                 if done % 10 == 0 or done == len(missing):
-                                    print(f"  [{done}/{len(missing)}] {res['title']} ({res['size']})", flush=True)
+                                    r_val = res.get("rating")
+                                    v_val = res.get("votes")
+                                    if r_val is not None:
+                                        v_str = f" ({v_val:,} votes)" if v_val else ""
+                                        rating_info = f"{r_val:.2f}/5{v_str}"
+                                    else:
+                                        rating_info = "--"
+                                    title_disp = res['title'][:40]
+                                    print(f"  [{done}/{len(missing)}] {title_disp} | {res['size']} | {rating_info}", flush=True)
                             else:
                                 if done % 10 == 0 or done == len(missing):
-                                    print(f"  [{done}/{len(missing)}] Scraping...", flush=True)
+                                    print(f"  [{done}/{len(missing)}] Scraping batch...", flush=True)
                 finally:
                     watcher.stop()
             ordered_games = [cached_games_map[u] for u, _ in all_items if u in cached_games_map]
@@ -1002,7 +1070,7 @@ def process_category(
 ===================================
  Category            : {category}
  Total Games Scraped : {len(ordered_games):,} / {total_games:,}
- Total Library Size  : {format_bytes(total_lib_bytes)}
+ Total Scraped Size  : {format_bytes(total_lib_bytes)}
  Database Saved To   : {json_path}
 ===================================
 """)
@@ -1314,6 +1382,12 @@ def main():
         help="Automated mode: skip all prompts, scrape and download all games automatically",
     )
     parser.add_argument(
+        "-l", "--limit",
+        type=int,
+        default=None,
+        help="Maximum number of games to fetch/scrape from web (e.g. 100, 500)",
+    )
+    parser.add_argument(
         "-m", "--metadata-only",
         action="store_true",
         help="Metadata mode: scrape sizes, media IDs and generate database.json without downloading ROM files",
@@ -1422,6 +1496,7 @@ def main():
             use_aria2=not args.no_aria2,
             split_connections=args.split_connections,
             auto_compress=user_compress,
+            limit=args.limit,
         )
         if user_compress is None and chosen_compress is not None:
             user_compress = chosen_compress

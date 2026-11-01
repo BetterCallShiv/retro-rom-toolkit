@@ -708,16 +708,17 @@ def calculate_overall_score(ratings):
     meta_score = meta.get("metascore") if meta else None
     ss_pct = ss.get("percentage") if ss else None
 
-    valid_scores = []
-    if meta_score is not None and 0 <= meta_score <= 100:
-        valid_scores.append(float(meta_score))
-    if ss_pct is not None and 0 <= ss_pct <= 100:
-        valid_scores.append(float(ss_pct))
+    has_meta = meta_score is not None and 0 <= meta_score <= 100
+    has_ss = ss_pct is not None and 0 <= ss_pct <= 100
 
-    if not valid_scores:
-        return 0.0
-
-    return round(max(valid_scores), 1)
+    if has_meta and has_ss:
+        # Weighted composite: 70% Metacritic (critic consensus) + 30% ScreenScraper (retro community)
+        return round(float(meta_score) * 0.7 + float(ss_pct) * 0.3, 1)
+    elif has_meta:
+        return round(float(meta_score), 1)
+    elif has_ss:
+        return round(float(ss_pct), 1)
+    return 0.0
 
 
 _progress_counter = 0
