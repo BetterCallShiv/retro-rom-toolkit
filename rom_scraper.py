@@ -718,17 +718,22 @@ def download_single_file(
         game["status"] = "downloaded"
         return True
 
-    dl_url = game.get("download_url")
+    dl_url = None
+    # Always fetch a fresh, zero-second-old CDN token on-demand right before downloading
+    if game.get("media_id") and game.get("url"):
+        fresh_url, _ = trigger_download(game["url"], game["media_id"])
+        if fresh_url:
+            dl_url = fresh_url
+            game["download_url"] = fresh_url
+
+    # Fallback to cached download_url if on-demand retrieval failed
     if not dl_url:
-        if game.get("media_id"):
-            fresh_url, _ = trigger_download(game["url"], game["media_id"])
-            if fresh_url:
-                dl_url = fresh_url
-                game["download_url"] = fresh_url
-        if not dl_url:
-            log_msg(f"  [NO LINK] {game['title']} (Missing download URL)", ui)
-            game["status"] = "failed"
-            return False
+        dl_url = game.get("download_url")
+
+    if not dl_url:
+        log_msg(f"  [NO LINK] {game['title']} (Missing download URL)", ui)
+        game["status"] = "failed"
+        return False
 
     session = get_session()
     headers = {
