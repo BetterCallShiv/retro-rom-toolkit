@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 ##########################################################################
-#   Script: Retro ROM Ranker
+#   Script: Retro ROM Toolkit - Ranker
 #   Author: @BetterCallShiv
 #   Features: 
 #       - Sorts entire ROM libraries from best to worst in descending quality order

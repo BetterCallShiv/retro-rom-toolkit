@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 ##########################################################################
-#   Script: RomsGames Scraper & Bulk Downloader
+#   Script: Retro ROM Toolkit - Scraper & Bulk Downloader
 #   Author: @BetterCallShiv
 #   Features: 
 #       - Scrapes complete game libraries & file sizes directly from romsgames.net
@@ -645,10 +645,16 @@ def log_msg(msg, ui=None):
     else:
         print(msg, flush=True)
 
-def _finalize_saved_file(dest_path, dest_dir, game, auto_compress=False, ui=None):
+def _finalize_saved_file(dest_path, dest_dir, game, auto_compress=False, ui=None, zip_unconverted=True):
     saved_size = os.path.getsize(dest_path)
 
-    if auto_compress and dest_path.lower().endswith((".zip", ".7z", ".rar", ".bin", ".cue", ".iso", ".img")):
+    supported_exts = (
+        ".zip", ".7z", ".rar", ".bin", ".cue", ".iso", ".img",
+        ".nds", ".gba", ".gb", ".gbc", ".nes", ".sfc", ".smc",
+        ".n64", ".z64", ".v64", ".md", ".gen", ".smd", ".gdi",
+        ".cdi", ".mdf", ".pce", ".3ds", ".cia"
+    )
+    if auto_compress and dest_path.lower().endswith(supported_exts):
         if not compress_rom:
             if ui and hasattr(ui, "game_finished"):
                 ui.game_finished(f"Saved: {game['filename']} ({format_bytes(saved_size)})", saved_size)
@@ -661,7 +667,9 @@ def _finalize_saved_file(dest_path, dest_dir, game, auto_compress=False, ui=None
                 ui.update_stage(game["filename"], "Compressing...")
             else:
                 log_msg(f"  [IDENTIFYING & COMPRESSING] Processing {game['filename']}...", ui)
-            ok_c, msg_c, sz_orig, sz_final, created_outs = compress_rom(dest_path, dest_dir, keep_source=False)
+            ok_c, msg_c, sz_orig, sz_final, created_outs = compress_rom(
+                dest_path, dest_dir, keep_source=False, zip_unconverted=zip_unconverted
+            )
             if ok_c and created_outs:
                 out_names = ", ".join(os.path.basename(c) for c in created_outs)
                 if sz_orig > sz_final and sz_orig > 0:
@@ -705,6 +713,7 @@ def download_single_file(
     use_aria2=True,
     split_connections=16,
     auto_compress=False,
+    zip_unconverted=True,
 ):
     original_name = game["filename"]
     game["filename"] = _deduplicate_filename(original_name, dest_dir)
@@ -826,7 +835,7 @@ def download_single_file(
                             os.remove(dest_path)
                         os.replace(temp_path, dest_path)
 
-                    return _finalize_saved_file(dest_path, dest_dir, game, auto_compress, ui)
+                    return _finalize_saved_file(dest_path, dest_dir, game, auto_compress, ui, zip_unconverted=zip_unconverted)
 
                 if os.path.exists(temp_path):
                     try:
@@ -896,7 +905,7 @@ def download_single_file(
                     if os.path.exists(dest_path):
                         os.remove(dest_path)
                     os.replace(temp_path, dest_path)
-                return _finalize_saved_file(dest_path, dest_dir, game, auto_compress, ui)
+                return _finalize_saved_file(dest_path, dest_dir, game, auto_compress, ui, zip_unconverted=zip_unconverted)
         except Exception as e:
             if os.path.exists(temp_path):
                 try:
@@ -1209,6 +1218,7 @@ def process_category(
                     use_aria2,
                     split_connections,
                     auto_compress,
+                    not getattr(args, "extract_raw", False),
                 )
                 for g in final_games
             ]
@@ -1331,6 +1341,7 @@ def process_database_file(
                     use_aria2,
                     split_connections,
                     auto_compress,
+                    not getattr(args, "extract_raw", False),
                 )
                 for g in games
             ]
@@ -1418,7 +1429,7 @@ def main():
         dest="compress",
         action="store_true",
         default=None,
-        help="Automatically compress downloaded games based on format (.cso for PSP, .chd for PS1/PS2, clean extraction for cartridge ROMs)",
+        help="Automatically compress downloaded games based on format (.cso for PSP, .chd for PS1/PS2, max-compressed .zip for unconverted/cartridge ROMs)",
     )
     parser.add_argument(
         "--no-compress",
@@ -1426,11 +1437,16 @@ def main():
         action="store_false",
         help="Disable automatic compression and skip interactive compression prompt",
     )
+    parser.add_argument(
+        "--extract-raw",
+        action="store_true",
+        help="Extract unconverted cartridge/disc files as raw files instead of zipping with max compression",
+    )
     args = parser.parse_args()
 
     print("""
 ===================================
-   ROMSGAMES.NET ROM DOWNLOADER   
+        RETRO-ROM-TOOLKIT         
 ===================================
 """)
 

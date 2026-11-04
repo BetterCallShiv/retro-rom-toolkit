@@ -1,4 +1,4 @@
-# 🎮 Retro ROM Toolkit
+# 🎮 Retro-ROM-Toolkit
 
 A fast and reliable Python toolkit to download retro game collections, rank games by review scores and compress disc images to save storage space.
 
@@ -12,7 +12,7 @@ Retro ROM Toolkit provides three standalone tools designed to work together or i
 | :--- | :--- | :--- |
 | **rom_scraper.py** | Scrape game lists and download ROMs with high speed | Game files + database.json |
 | **rom_ranker.py** | Score and rank games using Metacritic and ScreenScraper ratings | sorted_database.json |
-| **rom_compressor.py** | Auto-detect game formats and compress them to save disk space | .cso (PSP) and .chd (PS1/PS2) |
+| **rom_compressor.py** | Auto-detect game formats and compress them to save disk space | .cso (PSP), .chd (PS1/PS2/discs) and .zip |
 
 ---
 
@@ -24,7 +24,7 @@ Retro ROM Toolkit provides three standalone tools designed to work together or i
 - **Link Refresh**: Automatically refreshes download links if a link expires during long downloads.
 - **Custom Game Fetch Limit**: Choose how many games to fetch (e.g. top 100 or 500) instead of being forced to scrape all thousands of games (`-l` / `--limit`).
 - **Rich Metadata Collection**: Builds a complete catalog (`database.json`) storing game titles, file sizes, direct download URLs, community user ratings (out of 5.0) and vote counts (`--metadata-only`).
-- **Auto-Compress on Download**: Automatically compress downloaded games based on their format (.cso for PSP, .chd for PS1/PS2/discs) as soon as each download finishes (`--compress`).
+- **Auto-Compress on Download**: Automatically compress downloaded games based on their format (.cso for PSP, .chd for PS1/PS2/discs and max-compressed .zip for cartridge & unconverted ROMs) as soon as each download finishes (`--compress`).
 
 ### 2. ROM Ranker (rom_ranker.py)
 - **Dual Review Scoring**: Combines **70% Metacritic** (critic score) and **30% ScreenScraper.fr** (community score) into an overall rating out of 100.
@@ -36,7 +36,7 @@ Retro ROM Toolkit provides three standalone tools designed to work together or i
 - **PSP Games**: Compresses PSP ISOs into high-performance **.cso** format using **maxcso** (fully compatible with PPSSPP and PS Vita).
 - **PS2 Games**: Converts DVD and CD images into verified **.chd** files using MAME chdman.
 - **PS1 & Sega Games**: Decompresses .ecm files, creates missing .cue sheets when needed and converts discs into verified **.chd** files.
-- **Cartridge Games**: Extracts clean ROM files (.gba, .nds, .gb, etc.) from .zip and .7z archives.
+- **Cartridge & Handheld Games**: Extracts clean ROM files (.gba, .nds, .gb, .n64, etc.) and repacks them into verified, maximum-compression **.zip** archives cutting sizes by 40%–90% while keeping full emulator compatibility (or use `--extract-raw` to leave uncompressed).
 - **Safe Verification**: Tests the converted file before deleting original files so you never lose data. Saves 40% to 70% disk space.
 
 ---
@@ -86,8 +86,9 @@ python rom_scraper.py "https://www.romsgames.net/roms/gameboy-advance/?page=1&so
 | `-t`, `--scrape-threads` | Number of worker threads used to scan web pages | `30` |
 | `-d`, `--download-threads` | Number of games to download at the same time | `1` |
 | `-s`, `--split-connections` | Number of download connections per file (for aria2) | `8` |
-| `-c`, `--compress` | Automatically compress downloaded games without prompting | Prompts if omitted |
+| `-c`, `--compress` | Automatically compress downloaded games based on format (.cso, .chd, max .zip) | Prompts if omitted |
 | `--no-compress` | Keep downloads as-is and skip compression prompt | `False` |
+| `--extract-raw` | Extract unconverted cartridge/disc files as raw files instead of zipping with max compression | `False` |
 | `-m`, `--metadata-only` | Only build database.json, download zero game files | `False` |
 | `-a`, `--auto` | Skip confirmation prompts and download everything | `False` |
 | `-r`, `--refresh-cache` | Ignore saved database.json and scrape fresh data | `False` |
@@ -134,11 +135,12 @@ python rom_ranker.py database.json --platform gba
 
 ### 3. Compress Games to Save Space (rom_compressor.py)
 
-The compressor automatically identifies the game system, extracts archives and converts discs into the best compressed format:
-- **PSP games** $\rightarrow$ Compressed to **.cso**
-- **PS2 DVD games** $\rightarrow$ Compressed to **.chd** (DVD mode)
-- **PS1 / Sega games** $\rightarrow$ Compressed to **.chd** (CD mode)
-- **Cartridge games** $\rightarrow$ Extracted to clean ROM files
+The compressor automatically identifies the game system, extracts archives and converts files into the best compressed format:
+- **PSP games** $\rightarrow$ Compressed to **.cso** via maxcso
+- **PS2 DVD games** $\rightarrow$ Compressed to **.chd** (DVD mode via chdman)
+- **PS1 / Sega / Saturn / Dreamcast games** $\rightarrow$ Compressed to **.chd** (CD mode via chdman)
+- **Cartridge & unconverted games** (.nds, .gba, .gb, .n64, .snes, etc.) $\rightarrow$ Compressed into verified **.zip**
+- *Optionally*, use `--extract-raw` if you need loose uncompressed ROM files extracted instead.
 
 #### Compress an entire folder of games
 ```bash
@@ -165,13 +167,14 @@ python rom_compressor.py "./roms/playstation" --dry-run
 | `-t`, `--threads` | Number of games to compress at the same time | `2` |
 | `-k`, `--keep-source` | Keep the original archive files after successful conversion | `False` |
 | `--dry-run` | Show which files would be converted without making changes | `False` |
+| `--extract-raw` | Extract unconverted cartridge/disc files as raw files instead of zipping | `False` |
 
 ---
 
 ## 📊 Sample Output
 
 ### 1. Scraper Catalog (`database.json`)
-Generated by `rom_scraper.py`, capturing sizes, direct download links, user ratings, and community votes:
+Generated by `rom_scraper.py`, capturing sizes, direct download links, user ratings and community votes:
 
 ```json
 {
@@ -223,7 +226,7 @@ This project wouldn't have been possible without the work of these amazing proje
 * **[maxcso](https://github.com/unknownbrackets/maxcso)**: Fast multi-threaded ISO to CSO compressor for PSP games.
 * **[chdman](https://www.mamedev.org/)**: Official disc image compressor for lossless .chd files.
 * **[unecm](https://github.com/neillcorlett/corlett-source/tree/master/ecm)**: Utility for decompressing PlayStation ECM files.
-* **[7-Zip](https://www.7-zip.org/)**: File archiver used for extracting .7z and .rar files.
+* **[7-Zip](https://www.7-zip.org/)**: File archiver used for extracting archives and maximum DEFLATE (Level 9) .zip compression.
 * **[ScreenScraper.fr](https://www.screenscraper.fr/)**: Comprehensive database for retro game metadata and player ratings.
 * **[Metacritic](https://www.metacritic.com/)**: Video game review aggregation and critic scores.
 * **[romsgames.net](https://www.romsgames.net/)**: Online catalog for retro video game archives.

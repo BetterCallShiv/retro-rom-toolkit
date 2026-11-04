@@ -8,6 +8,7 @@
 #       - PSP: Automatically compresses ISOs to high-performance .cso (CISO)
 #       - PS2: Automatically compresses DVD/CD images to .chd
 #       - PS1 / Sega: Automatically converts CUE/BIN/ECM to verified .chd
+#       - Unconverted / Cartridge ROMs: Auto-compresses to verified .zip (DEFLATE Level 9)
 #       - Extracts .zip, .7z and .rar archives before converting
 #       - Decompresses .ecm files and auto-generates missing .cue files
 #       - Strict integrity verification (chdman verify) before removing original files
@@ -352,6 +353,92 @@ def compress_iso_to_cso(iso_path, cso_path, num_threads=None):
     return res_code == 0 and os.path.isfile(cso_path) and os.path.getsize(cso_path) > 0
 
 
+CART_EXTENSIONS = (
+    ".gba", ".nds", ".gb", ".gbc", ".nes", ".sfc", ".smc",
+    ".n64", ".z64", ".v64", ".md", ".gen", ".smd", ".pce",
+    ".sms", ".gg", ".ws", ".wsc", ".ngp", ".ngc", ".a26",
+    ".a52", ".a78", ".lnx", ".vb", ".3ds", ".cia"
+)
+
+
+def create_max_zip(target_zip, files_to_zip, base_dir=None, timeout=600):
+    if not files_to_zip:
+        return False, "No files to zip", 0
+
+    target_dir = os.path.dirname(target_zip)
+    if target_dir:
+        os.makedirs(target_dir, exist_ok=True)
+
+    temp_zip = target_zip + f".tmp_{os.getpid()}_{threading.current_thread().ident}_{int(time.time()*1000)}.zip"
+    if os.path.exists(temp_zip):
+        try:
+            os.remove(temp_zip)
+        except OSError:
+            pass
+
+    # 1. Try 7-Zip first for ultra-tight level 9 compression
+    sevenzip = SEVENZIP_BIN or find_tool("7z")
+    if sevenzip and os.path.isfile(sevenzip):
+        working_dir = base_dir if base_dir else (os.path.dirname(files_to_zip[0]) or None)
+        rel_files = [os.path.relpath(f, working_dir) if working_dir else os.path.basename(f) for f in files_to_zip]
+
+        cmd = [sevenzip, "a", "-tzip", "-mx=9", "-mm=Deflate", "-y", temp_zip] + rel_files
+        proc = subprocess.Popen(cmd, cwd=working_dir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        with _lock:
+            _active_procs.add(proc)
+        try:
+            res_code = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            res_code = 1
+        finally:
+            with _lock:
+                _active_procs.discard(proc)
+
+        if res_code == 0 and os.path.isfile(temp_zip) and os.path.getsize(temp_zip) > 0:
+            cmd_t = [sevenzip, "t", "-y", temp_zip]
+            res_t = subprocess.run(cmd_t, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if res_t.returncode == 0:
+                if os.path.exists(target_zip):
+                    try:
+                        os.remove(target_zip)
+                    except OSError:
+                        pass
+                shutil.move(temp_zip, target_zip)
+                return True, "7-Zip Deflate Level 9", os.path.getsize(target_zip)
+
+    # 2. Fallback to Python's zipfile with compresslevel=9
+    try:
+        with zipfile.ZipFile(temp_zip, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9, allowZip64=True) as zf:
+            for f in files_to_zip:
+                arcname = os.path.basename(f)
+                zf.write(f, arcname)
+
+        with zipfile.ZipFile(temp_zip, "r") as zf:
+            if zf.testzip() is not None:
+                if os.path.exists(temp_zip):
+                    try:
+                        os.remove(temp_zip)
+                    except OSError:
+                        pass
+                return False, "Zip CRC verification failed", 0
+
+        if os.path.exists(target_zip):
+            try:
+                os.remove(target_zip)
+            except OSError:
+                pass
+        shutil.move(temp_zip, target_zip)
+        return True, "Python Deflate Level 9", os.path.getsize(target_zip)
+    except Exception as e:
+        if os.path.exists(temp_zip):
+            try:
+                os.remove(temp_zip)
+            except OSError:
+                pass
+        return False, f"Zip compression error: {e}", 0
+
+
 def inspect_disc_image(file_path):
     fn = os.path.basename(file_path).lower()
     parent = os.path.basename(os.path.dirname(file_path)).lower()
@@ -381,7 +468,7 @@ def inspect_disc_image(file_path):
     return "ps1"
 
 
-def compress_rom(src_path, dest_dir=None, keep_source=False, num_threads=None):
+def compress_rom(src_path, dest_dir=None, keep_source=False, num_threads=None, zip_unconverted=True):
     if not os.path.isfile(src_path):
         return False, "Source file not found", 0, 0, []
     src_path = os.path.abspath(src_path)
@@ -429,7 +516,7 @@ def compress_rom(src_path, dest_dir=None, keep_source=False, num_threads=None):
         cue_files = [f for f in extracted_files if f.lower().endswith(".cue")]
         toc_files = [f for f in extracted_files if f.lower().endswith(".toc")]
         gdi_files = [f for f in extracted_files if f.lower().endswith(".gdi")]
-        cart_files = [f for f in extracted_files if f.lower().endswith((".gba", ".nds", ".gb", ".gbc", ".nes", ".sfc", ".smc", ".n64", ".z64", ".md"))]
+        cart_files = [f for f in extracted_files if f.lower().endswith(CART_EXTENSIONS)]
         is_psp = False
         psp_iso = None
         if iso_files:
@@ -456,22 +543,54 @@ def compress_rom(src_path, dest_dir=None, keep_source=False, num_threads=None):
                     pass
             return True, "PSP CSO Compressed", raw_iso_size, cso_size, [target_cso]
         if cart_files and not iso_files and not cue_files:
-            created = []
-            for cf in cart_files:
-                target_rom = os.path.join(dest_dir, os.path.basename(cf))
-                if os.path.exists(target_rom):
-                    os.remove(target_rom)
-                shutil.move(cf, target_rom)
-                created.append(target_rom)
-            if not keep_source and ext in (".zip", ".7z", ".rar") and os.path.exists(src_path):
-                try:
-                    os.remove(src_path)
-                except OSError:
-                    pass
-            final_size = sum(os.path.getsize(c) for c in created)
-            return True, "Extracted Clean ROM", src_size, final_size, created
+            raw_cart_size = sum(os.path.getsize(c) for c in cart_files)
+            if zip_unconverted:
+                if len(cart_files) == 1:
+                    clean_name = os.path.splitext(os.path.basename(cart_files[0]))[0]
+                    target_zip = os.path.join(dest_dir, f"{clean_name}.zip")
+                else:
+                    target_zip = os.path.join(dest_dir, f"{base_title}.zip")
+
+                ok_z, method_z, final_size = create_max_zip(target_zip, cart_files, base_dir=work_dir)
+                if not ok_z:
+                    return False, f"ZIP compression failed: {method_z}", raw_cart_size, 0, []
+
+                if not keep_source and os.path.exists(src_path) and os.path.abspath(src_path) != os.path.abspath(target_zip):
+                    try:
+                        os.remove(src_path)
+                    except OSError:
+                        pass
+                return True, "Max Compressed ZIP", raw_cart_size, final_size, [target_zip]
+            else:
+                created = []
+                for cf in cart_files:
+                    target_rom = os.path.join(dest_dir, os.path.basename(cf))
+                    if os.path.exists(target_rom):
+                        os.remove(target_rom)
+                    shutil.move(cf, target_rom)
+                    created.append(target_rom)
+                if not keep_source and ext in (".zip", ".7z", ".rar") and os.path.exists(src_path):
+                    try:
+                        os.remove(src_path)
+                    except OSError:
+                        pass
+                final_size = sum(os.path.getsize(c) for c in created)
+                return True, "Extracted Clean ROM", raw_cart_size, final_size, created
         chdman_tool = ensure_chdman(interactive=False)
         if not chdman_tool:
+            if zip_unconverted:
+                disc_candidates = [f for f in extracted_files if f.lower().endswith((".bin", ".iso", ".img", ".cue", ".toc", ".gdi", ".mdf", ".raw", ".wbfs"))] or extracted_files
+                if disc_candidates:
+                    target_zip = os.path.join(dest_dir, f"{base_title}.zip")
+                    raw_bytes = sum(os.path.getsize(f) for f in disc_candidates)
+                    ok_z, method_z, final_size = create_max_zip(target_zip, disc_candidates, base_dir=work_dir)
+                    if ok_z:
+                        if not keep_source and os.path.exists(src_path) and os.path.abspath(src_path) != os.path.abspath(target_zip):
+                            try:
+                                os.remove(src_path)
+                            except OSError:
+                                pass
+                        return True, "Max Compressed ZIP", raw_bytes, final_size, [target_zip]
             return False, "chdman not found! Run 'python rom_compressor.py' to auto-download.", src_size, 0, []
         ecm_files = [f for f in extracted_files if f.lower().endswith(".ecm")]
         if ecm_files:
@@ -556,6 +675,22 @@ def compress_rom(src_path, dest_dir=None, keep_source=False, num_threads=None):
                     create_cue_sheet(rf, gen_cue)
                     input_discs.append((gen_cue, "createcd"))
         if not input_discs:
+            if zip_unconverted:
+                relevant_files = [
+                    f for f in all_now
+                    if f.lower().endswith((".bin", ".iso", ".img", ".cue", ".toc", ".gdi", ".mdf", ".raw", ".wbfs", ".cso", ".chd"))
+                ] or [f for f in all_now if os.path.isfile(f)]
+                if relevant_files:
+                    target_zip = os.path.join(dest_dir, f"{base_title}.zip")
+                    raw_bytes = sum(os.path.getsize(f) for f in relevant_files)
+                    ok_z, method_z, final_size = create_max_zip(target_zip, relevant_files, base_dir=work_dir)
+                    if ok_z:
+                        if not keep_source and os.path.exists(src_path) and os.path.abspath(src_path) != os.path.abspath(target_zip):
+                            try:
+                                os.remove(src_path)
+                            except OSError:
+                                pass
+                        return True, "Max Compressed ZIP", raw_bytes, final_size, [target_zip]
             return False, "No convertible disc image or .cue sheet found", src_size, 0, []
         raw_disc_bytes = sum(
             os.path.getsize(f) for f in all_now
@@ -660,10 +795,15 @@ def main():
         action="store_true",
         help="List files that would be converted without making changes",
     )
+    parser.add_argument(
+        "--extract-raw",
+        action="store_true",
+        help="Extract unconverted cartridge/disc files as raw files instead of zipping with max compression",
+    )
     args = parser.parse_args()
     print("""
 ===================================
-   RETRO ROM AUTO-COMPRESSOR 
+   RETRO-ROM-TOOLKIT COMPRESSOR   
 ===================================
 """)
     chdman_tool = ensure_chdman(interactive=True)
@@ -674,6 +814,7 @@ def main():
     print(f"  unecm Engine  : {UNECM_BIN or 'Not found'}")
     print(f"  7z Engine     : {SEVENZIP_BIN or 'Not found (using zipfile fallback)'}")
     print("=" * 60)
+    valid_exts = (".zip", ".7z", ".rar", ".cue", ".iso", ".img", ".bin", ".gdi", ".toc", ".mdf", ".cso", ".chd") + CART_EXTENSIONS
     candidates = []
     for p in args.paths:
         if os.path.isfile(p):
@@ -681,7 +822,7 @@ def main():
         elif os.path.isdir(p):
             for root, _, files in os.walk(p):
                 for f in sorted(files):
-                    if f.lower().endswith((".zip", ".7z", ".cue", ".iso", ".img", ".bin")):
+                    if f.lower().endswith(valid_exts):
                         candidates.append(os.path.join(root, f))
     candidates = sorted(list(set(candidates)))
     if not candidates:
@@ -708,6 +849,7 @@ def main():
             dest_dir=out_d,
             keep_source=args.keep_source,
             num_threads=None,
+            zip_unconverted=not args.extract_raw,
         )
         return file_path, ok, msg, sz_src, sz_final, outs
     with ThreadPoolExecutor(max_workers=args.threads) as ex:
