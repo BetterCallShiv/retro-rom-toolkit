@@ -18,6 +18,7 @@
 ##########################################################################
 
 import argparse
+import contextlib
 import json
 import math
 import os
@@ -88,13 +89,64 @@ _local = threading.local()
 _active_procs = set()
 _active_procs_lock = threading.Lock()
 
-def get_aria2_executable():
-    if aria2c is not None and hasattr(aria2c, "ARIA2C") and os.path.isfile(str(aria2c.ARIA2C)):
-        return str(aria2c.ARIA2C)
-    bin_path = shutil.which("aria2c") or shutil.which("aria2c.exe")
-    if bin_path:
-        return bin_path
+_cached_aria2_bin = None
+_checked_aria2 = False
+_aria2_disabled = False
+
+def _get_ca_bundle():
+    try:
+        import certifi
+        cp = certifi.where()
+        if cp and os.path.isfile(cp):
+            return cp
+    except Exception:
+        pass
+
+    termux_cert = os.path.join(os.environ.get("PREFIX", "/data/data/com.termux/files/usr"), "etc", "tls", "cert.pem")
+    for p in [termux_cert, "/data/data/com.termux/files/usr/etc/tls/cert.pem", "/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt"]:
+        if os.path.isfile(p):
+            return p
     return None
+
+def get_aria2_executable():
+    global _cached_aria2_bin, _checked_aria2, _aria2_disabled
+    if _aria2_disabled:
+        return None
+    if _checked_aria2:
+        return _cached_aria2_bin
+
+    candidates = []
+
+    termux_prefix = os.environ.get("PREFIX", "/data/data/com.termux/files/usr")
+    if os.path.isdir(termux_prefix):
+        candidates.append(os.path.join(termux_prefix, "bin", "aria2c"))
+    candidates.append("/data/data/com.termux/files/usr/bin/aria2c")
+
+    sys_which = shutil.which("aria2c") or shutil.which("aria2c.exe")
+    if sys_which:
+        candidates.append(sys_which)
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates.append(os.path.join(script_dir, "tools", "aria2c.exe"))
+    candidates.append(os.path.join(script_dir, "tools", "aria2c"))
+
+    if aria2c is not None and hasattr(aria2c, "ARIA2C") and os.path.isfile(str(aria2c.ARIA2C)):
+        candidates.append(str(aria2c.ARIA2C))
+
+    valid_bin = None
+    for c in candidates:
+        if c and os.path.isfile(c):
+            try:
+                res = subprocess.run([c, "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
+                if res.returncode == 0:
+                    valid_bin = c
+                    break
+            except Exception:
+                continue
+
+    _cached_aria2_bin = valid_bin
+    _checked_aria2 = True
+    return valid_bin
 
 def force_exit(msg="\n[!] Force quit requested (Ctrl+C). Exiting immediately..."):
     with _active_procs_lock:
@@ -704,6 +756,86 @@ def _finalize_saved_file(dest_path, dest_dir, game, auto_compress=False, ui=None
     game["status"] = "downloaded"
     return True
 
+def _download_with_python(dl_url, temp_path, headers, game, ui=None, session=None, timeout=(15, 60)):
+    total_file_bytes = game.get("size_bytes", 0)
+    try:
+        s = session or get_session()
+        with s.get(dl_url, headers=headers, stream=True, timeout=timeout) as r:
+            if r.status_code in (403, 410, 503):
+                return False, "TOKEN_EXPIRED", r.status_code
+            if r.status_code != 200:
+                return False, f"HTTP_{r.status_code}", r.status_code
+            total_len = int(r.headers.get("content-length", 0)) or total_file_bytes
+            if game.get("size_bytes", 0) == 0 and total_len > 0:
+                game["size_bytes"] = total_len
+                game["size"] = format_bytes(total_len)
+            downloaded = 0
+            t_last = time.time()
+            last_b = 0
+            with open(temp_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=256 * 1024):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        now = time.time()
+                        elapsed = now - t_last
+                        if elapsed >= 0.3:
+                            speed = int((downloaded - last_b) / elapsed) if elapsed > 0 else 0
+                            t_last = now
+                            last_b = downloaded
+                            if ui and hasattr(ui, "update"):
+                                ui.update(game["filename"], downloaded, total_len or total_file_bytes, speed)
+            if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
+                return True, "SUCCESS", 200
+    except Exception:
+        pass
+    try:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+        import ssl
+        import urllib.request
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        req = urllib.request.Request(dl_url, headers=headers)
+        with urllib.request.urlopen(req, context=ctx, timeout=timeout[1]) as resp:
+            code = resp.getcode()
+            if code in (403, 410, 503):
+                return False, "TOKEN_EXPIRED", code
+            if code != 200:
+                return False, f"HTTP_{code}", code
+            total_len = int(resp.headers.get("Content-Length", 0)) or total_file_bytes
+            if game.get("size_bytes", 0) == 0 and total_len > 0:
+                game["size_bytes"] = total_len
+                game["size"] = format_bytes(total_len)
+            downloaded = 0
+            t_last = time.time()
+            last_b = 0
+            with open(temp_path, "wb") as f:
+                while True:
+                    chunk = resp.read(256 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    now = time.time()
+                    elapsed = now - t_last
+                    if elapsed >= 0.3:
+                        speed = int((downloaded - last_b) / elapsed) if elapsed > 0 else 0
+                        t_last = now
+                        last_b = downloaded
+                        if ui and hasattr(ui, "update"):
+                            ui.update(game["filename"], downloaded, total_len or total_file_bytes, speed)
+            if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
+                return True, "SUCCESS", 200
+    except Exception as e_url:
+        return False, str(e_url), 0
+    return False, "Download stream failed", 0
+
+
 def download_single_file(
     game,
     dest_dir,
@@ -715,6 +847,7 @@ def download_single_file(
     auto_compress=False,
     zip_unconverted=True,
 ):
+    global _aria2_disabled
     original_name = game["filename"]
     game["filename"] = _deduplicate_filename(original_name, dest_dir)
     dest_path = os.path.join(dest_dir, game["filename"])
@@ -726,19 +859,14 @@ def download_single_file(
             log_msg(f"  ✓ Already exists: {game['filename']}", ui)
         game["status"] = "downloaded"
         return True
-
     dl_url = None
-    # Always fetch a fresh, zero-second-old CDN token on-demand right before downloading
     if game.get("media_id") and game.get("url"):
         fresh_url, _ = trigger_download(game["url"], game["media_id"])
         if fresh_url:
             dl_url = fresh_url
             game["download_url"] = fresh_url
-
-    # Fallback to cached download_url if on-demand retrieval failed
     if not dl_url:
         dl_url = game.get("download_url")
-
     if not dl_url:
         log_msg(f"  [NO LINK] {game['title']} (Missing download URL)", ui)
         game["status"] = "failed"
@@ -754,14 +882,13 @@ def download_single_file(
     temp_path = os.path.join(dest_dir, temp_filename)
     aria2_ctrl_path = temp_path + ".aria2"
 
-    aria2_bin = get_aria2_executable() if use_aria2 else None
-
+    aria2_bin = get_aria2_executable() if (use_aria2 and not _aria2_disabled) else None
     if ui and hasattr(ui, "update"):
         ui.update(game["filename"], 0, game.get("size_bytes", 0), 0)
-
     max_retries = 4
     for attempt in range(max_retries):
-        if aria2_bin:
+        aria2_downloaded = False
+        if aria2_bin and not _aria2_disabled:
             try:
                 cmd = [
                     aria2_bin,
@@ -771,6 +898,9 @@ def download_single_file(
                     "-s", str(min(16, max(1, split_connections))),
                     "-k", "1M",
                     "--file-allocation=none",
+                    "--check-certificate=false",
+                    "--async-dns=false",
+                    "--enable-mmap=false",
                     "--summary-interval=1",
                     "--show-console-readout=false",
                     "--console-log-level=warn",
@@ -779,8 +909,11 @@ def download_single_file(
                     "--auto-file-renaming=false",
                     "--dir", dest_dir,
                     "--out", temp_filename,
-                    dl_url,
                 ]
+                ca_bundle = _get_ca_bundle()
+                if ca_bundle:
+                    cmd.insert(1, f"--ca-certificate={ca_bundle}")
+                cmd.append(dl_url)
 
                 proc = subprocess.Popen(
                     cmd,
@@ -824,19 +957,23 @@ def download_single_file(
                     _active_procs.discard(proc)
 
                 if proc.returncode == 0 and os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
+                    aria2_downloaded = True
+                else:
+                    if os.path.exists(temp_path):
+                        try:
+                            os.remove(temp_path)
+                        except OSError:
+                            pass
                     if os.path.exists(aria2_ctrl_path):
                         try:
                             os.remove(aria2_ctrl_path)
                         except OSError:
                             pass
-
-                    with file_lock:
-                        if os.path.exists(dest_path):
-                            os.remove(dest_path)
-                        os.replace(temp_path, dest_path)
-
-                    return _finalize_saved_file(dest_path, dest_dir, game, auto_compress, ui, zip_unconverted=zip_unconverted)
-
+                    log_msg(f"  [aria2 failed (code {proc.returncode}), using Python downloader] {game['filename']}", ui)
+                    if attempt == 0 and proc.returncode in (1, 2, 8, 127):
+                        _aria2_disabled = True
+            except Exception as e_aria:
+                _aria2_disabled = True
                 if os.path.exists(temp_path):
                     try:
                         os.remove(temp_path)
@@ -847,77 +984,59 @@ def download_single_file(
                         os.remove(aria2_ctrl_path)
                     except OSError:
                         pass
+                log_msg(f"  [aria2 error ({e_aria}), using Python downloader] {game['filename']}", ui)
 
-                if attempt < max_retries - 1 and game.get("media_id"):
-                    log_msg(f"  [REFRESHING LINK] {game['filename']} (CDN token expired, refreshing...)", ui)
-                    fresh_url, _ = trigger_download(game["url"], game["media_id"])
-                    if fresh_url:
-                        dl_url = fresh_url
-                        game["download_url"] = fresh_url
-                        continue
-            except Exception:
-                if os.path.exists(temp_path):
-                    try:
-                        os.remove(temp_path)
-                    except OSError:
-                        pass
-                if os.path.exists(aria2_ctrl_path):
-                    try:
-                        os.remove(aria2_ctrl_path)
-                    except OSError:
-                        pass
-
-        try:
-            with session.get(dl_url, headers=headers, stream=True, timeout=(10, 35)) as r:
-                if r.status_code in (403, 410, 503) and attempt < max_retries - 1 and game.get("media_id"):
-                    log_msg(f"  [REFRESHING LINK] {game['filename']} (CDN token expired, refreshing...)", ui)
-                    fresh_url, _ = trigger_download(game["url"], game["media_id"])
-                    if fresh_url:
-                        dl_url = fresh_url
-                        game["download_url"] = fresh_url
-                        continue
-                if r.status_code != 200:
-                    log_msg(f"  [HTTP {r.status_code}] Failed to download: {game['filename']}", ui)
-                    game["status"] = "failed"
-                    return False
-                total_len = int(r.headers.get("content-length", 0))
-                if game.get("size_bytes", 0) == 0 and total_len > 0:
-                    game["size_bytes"] = total_len
-                    game["size"] = format_bytes(total_len)
-                downloaded = 0
-                t_last = time.time()
-                last_b = 0
-                with open(temp_path, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=128 * 1024):
-                        if chunk:
-                            f.write(chunk)
-                            downloaded += len(chunk)
-                            now = time.time()
-                            elapsed = now - t_last
-                            if elapsed >= 0.3:
-                                speed = int((downloaded - last_b) / elapsed) if elapsed > 0 else 0
-                                t_last = now
-                                last_b = downloaded
-                                if ui and hasattr(ui, "update"):
-                                    ui.update(game["filename"], downloaded, total_len, speed)
-            if os.path.exists(temp_path):
-                with file_lock:
-                    if os.path.exists(dest_path):
-                        os.remove(dest_path)
-                    os.replace(temp_path, dest_path)
-                return _finalize_saved_file(dest_path, dest_dir, game, auto_compress, ui, zip_unconverted=zip_unconverted)
-        except Exception as e:
-            if os.path.exists(temp_path):
+        lock_ctx = file_lock if file_lock is not None else contextlib.nullcontext()
+        if aria2_downloaded:
+            if os.path.exists(aria2_ctrl_path):
                 try:
-                    os.remove(temp_path)
+                    os.remove(aria2_ctrl_path)
                 except OSError:
                     pass
-            if attempt < max_retries - 1:
-                wait = 3 * (2 ** attempt)
-                log_msg(f"  [RETRY {attempt+1}/{max_retries}] {game['filename']}: {e} (waiting {wait}s...)", ui)
-                time.sleep(wait)
-            else:
-                log_msg(f"  [ERROR] {game['filename']}: {e}", ui)
+            with lock_ctx:
+                if os.path.exists(dest_path):
+                    os.remove(dest_path)
+                os.replace(temp_path, dest_path)
+            return _finalize_saved_file(dest_path, dest_dir, game, auto_compress, ui, zip_unconverted=zip_unconverted)
+        py_ok, py_status, py_code = _download_with_python(dl_url, temp_path, headers, game, ui=ui, session=session)
+        if py_ok:
+            if os.path.exists(aria2_ctrl_path):
+                try:
+                    os.remove(aria2_ctrl_path)
+                except OSError:
+                    pass
+            with lock_ctx:
+                if os.path.exists(dest_path):
+                    os.remove(dest_path)
+                os.replace(temp_path, dest_path)
+            return _finalize_saved_file(dest_path, dest_dir, game, auto_compress, ui, zip_unconverted=zip_unconverted)
+
+        if py_status == "TOKEN_EXPIRED":
+            if attempt < max_retries - 1 and game.get("media_id"):
+                log_msg(f"  [REFRESHING LINK] {game['filename']} (CDN token expired, refreshing...)", ui)
+                fresh_url, _ = trigger_download(game["url"], game["media_id"])
+                if fresh_url:
+                    dl_url = fresh_url
+                    game["download_url"] = fresh_url
+                    continue
+
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+        if attempt < max_retries - 1:
+            wait = 2 * (attempt + 1)
+            log_msg(f"  [RETRY {attempt+1}/{max_retries}] {game['filename']}: {py_status} (retrying in {wait}s...)", ui)
+            if game.get("media_id"):
+                fresh_url, _ = trigger_download(game["url"], game["media_id"])
+                if fresh_url:
+                    dl_url = fresh_url
+                    game["download_url"] = fresh_url
+            time.sleep(wait)
+        else:
+            log_msg(f"  [ERROR] {game['filename']}: {py_status}", ui)
+
     game["status"] = "failed"
     return False
 
